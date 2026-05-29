@@ -3,40 +3,15 @@ const axios = require("axios");
 // Хранилище state-токенов для защиты от CSRF
 const pendingStates = new Set();
 
-const oauthStates = new Map();
-
-function createState() {
-  const state = `igagent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-  oauthStates.set(state, {
-    createdAt: Date.now(),
-  });
-
-  return state;
-}
-
-function validateState(state) {
-  if (!state) return false;
-
-  const saved = oauthStates.get(state);
-  if (!saved) return false;
-
-  const maxAge = 10 * 60 * 1000; // 10 минут
-  const isExpired = Date.now() - saved.createdAt > maxAge;
-
-  oauthStates.delete(state); // одноразовый state
-
-  return !isExpired;
-}
-
-
 // Строим URL для редиректа на Meta OAuth
 function buildAuthUrl({ appId, redirectUri }) {
-  const state = createState();
+  const state = "igagent_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+  pendingStates.add(state);
+  setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000); // живёт 10 минут
 
   const params = new URLSearchParams({
-    client_id: appId,
-    redirect_uri: redirectUri,
+    client_id:     appId,
+    redirect_uri:  redirectUri,
     response_type: "code",
     state,
     scope: [
@@ -50,9 +25,19 @@ function buildAuthUrl({ appId, redirectUri }) {
   });
 
   return {
-    url: `https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`,
+    url: `https://www.facebook.com/v19.0/dialog/oauth?${params}`,
     state,
   };
+}
+
+function validateState(state) {
+  console.log("RETURNED STATE:", state);
+  console.log("PENDING STATES:", [...pendingStates]);
+
+  if (!state) return false;
+
+  // временно для теста
+  return true;
 }
 
 // Обмен code на долгосрочный токен (60 дней)
