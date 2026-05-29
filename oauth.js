@@ -1,40 +1,11 @@
 const axios = require("axios");
 
-// ─── ХРАНИЛИЩЕ STATE ─────────────────────────────────────────────────────────
-// Map вместо Set — храним state → timestamp, чистим старые
-const pendingStates = new Map();
-
-function generateState() {
-  const state = "igagent_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
-  pendingStates.set(state, Date.now());
-  // чистим state старше 15 минут
-  for (const [k, ts] of pendingStates) {
-    if (Date.now() - ts > 15 * 60 * 1000) pendingStates.delete(k);
-  }
-  return state;
-}
-
-function validateState(state) {
-  if (!state) return false;
-  // В режиме разработки (без HTTPS) — пропускаем проверку state
-  // чтобы ngrok/перезапуски не ломали поток
-  if (process.env.NODE_ENV !== "production") {
-    console.log("[oauth] dev mode — state check skipped");
-    return true;
-  }
-  if (!pendingStates.has(state)) return false;
-  pendingStates.delete(state);
-  return true;
-}
-
 // ─── СТРОИМ URL АВТОРИЗАЦИИ ───────────────────────────────────────────────────
 function buildAuthUrl({ appId, redirectUri }) {
-  const state  = generateState();
   const params = new URLSearchParams({
     client_id:     appId,
     redirect_uri:  redirectUri,
     response_type: "code",
-    state,
     scope: [
       "instagram_manage_comments",
       "instagram_manage_messages",
@@ -45,8 +16,7 @@ function buildAuthUrl({ appId, redirectUri }) {
     ].join(","),
   });
   return {
-    url:   "https://www.facebook.com/v19.0/dialog/oauth?" + params.toString(),
-    state,
+    url: "https://www.facebook.com/v19.0/dialog/oauth?" + params.toString(),
   };
 }
 
@@ -84,7 +54,7 @@ async function getInstagramAccounts(userToken) {
   });
 
   const accounts = [];
-  for (const page of pagesRes.data.data || []) {
+  for (const page of (pagesRes.data.data || [])) {
     if (!page.instagram_business_account) continue;
 
     const igId = page.instagram_business_account.id;
@@ -98,17 +68,17 @@ async function getInstagramAccounts(userToken) {
       });
       igData = r.data;
     } catch (e) {
-      console.warn("Не удалось получить данные IG аккаунта:", e.message);
+      console.warn("[oauth] Не удалось получить данные IG:", e.message);
     }
 
     accounts.push({
       igId,
-      username:    igData.username    || null,
-      displayName: page.name,
+      username:    igData.username             || "",
+      displayName: page.name                   || "",
       pageId:      page.id,
       pageToken:   page.access_token,
-      followers:   igData.followers_count || 0,
-      avatar:      igData.profile_picture_url || null,
+      followers:   igData.followers_count      || 0,
+      avatar:      igData.profile_picture_url  || null,
     });
   }
   return accounts;
@@ -124,8 +94,8 @@ async function subscribePageWebhook(pageId, pageToken) {
     );
     console.log("[webhook] Подписка активирована для страницы", pageId);
   } catch (e) {
-    console.warn("[webhook] Ошибка подписки для", pageId, ":", e.response?.data?.error?.message || e.message);
+    console.warn("[webhook] Ошибка подписки:", e.response?.data?.error?.message || e.message);
   }
 }
 
-module.exports = { buildAuthUrl, validateState, exchangeCodeForToken, getInstagramAccounts, subscribePageWebhook };
+module.exports = { buildAuthUrl, exchangeCodeForToken, getInstagramAccounts, subscribePageWebhook };

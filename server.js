@@ -6,7 +6,6 @@ const path    = require("path");
 
 const {
   buildAuthUrl,
-  validateState,
   exchangeCodeForToken,
   getInstagramAccounts,
   subscribePageWebhook,
@@ -39,7 +38,7 @@ function saveConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 
-// ─── ЛОГИ И СОСТОЯНИЯ ────────────────────────────────────────────────────────
+// ─── ЛОГИ ────────────────────────────────────────────────────────────────────
 const userState = new Map();
 const eventLog  = [];
 
@@ -47,87 +46,94 @@ function log(type, account, message) {
   const entry = { time: new Date().toISOString(), type, account, message };
   eventLog.unshift(entry);
   if (eventLog.length > 500) eventLog.pop();
-  console.log("[" + entry.time + "] [" + type + "] " + account + ": " + message);
+  console.log("[" + entry.time.slice(11,19) + "] [" + type + "] " + account + ": " + message);
 }
 
-// ─── HELPER: отправить ответ в popup и закрыть его ───────────────────────────
+// ─── HELPER: закрыть popup и передать результат ───────────────────────────────
 function sendPopupMessage(res, type, payload) {
   const data = JSON.stringify({ type, ...payload });
   res.send(
     "<!DOCTYPE html><html><body><script>" +
-    "try{window.opener&&window.opener.postMessage(" + data + ",'*');}catch(e){}" +
-    "setTimeout(function(){window.close();},300);" +
-    "</script><p>Закрываем окно...</p></body></html>"
+    "(function(){" +
+    "  try{ window.opener && window.opener.postMessage(" + data + ", '*'); }catch(e){}" +
+    "  setTimeout(function(){ window.close(); }, 300);" +
+    "})();" +
+    "</script><p style='font-family:sans-serif;padding:20px'>" +
+    (type === "oauth_success" ? "✅ Готово! Закрываем окно..." : "❌ " + (payload.message || "Ошибка")) +
+    "</p></body></html>"
   );
 }
 
-// ─── OAUTH: шаг 1 — фронтенд запрашивает URL ─────────────────────────────────
+// ─── OAUTH ────────────────────────────────────────────────────────────────────
+
+// Фронтенд запрашивает URL → сервер отдаёт готовую ссылку для popup
 app.get("/auth/instagram", (req, res) => {
   const cfg = loadConfig();
-  if (!cfg.appId) {
-    return res.status(400).json({ error: "Заполните ID приложения в разделе Настройки" });
-  }
-  if (!cfg.appSecret) {
-    return res.status(400).json({ error: "Заполните Секрет приложения в разделе Настройки" });
-  }
-  // Используем redirectUri из конфига, или строим автоматически
-  const redirectUri = cfg.redirectUri && cfg.redirectUri.startsWith("http")
-    ? cfg.redirectUri
+
+  if (!cfg.appId)     return res.status(400).json({ error: "Заполните ID приложения в Настройках" });
+  if (!cfg.appSecret) return res.status(400).json({ error: "Заполните Секрет приложения в Настройках" });
+
+  // redirectUri: из конфига или строим автоматически из хоста
+  const redirectUri = (cfg.redirectUri || "").trim().startsWith("http")
+    ? cfg.redirectUri.trim()
     : req.protocol + "://" + req.get("host") + "/auth/callback";
 
-  const { url, state } = buildAuthUrl({ appId: cfg.appId, redirectUri });
+  console.log("[oauth] App ID:", cfg.appId);
   console.log("[oauth] Redirect URI:", redirectUri);
-  res.json({ url, state, redirectUri });
+
+  const { url } = buildAuthUrl({ appId: cfg.appId, redirectUri });
+  res.json({ url, redirectUri });
 });
 
-// ─── OAUTH: шаг 2 — Meta редиректит сюда с code ──────────────────────────────
+// Meta редиректит сюда после того как пользователь авторизовался
 app.get("/auth/callback", async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  const { code, error, error_description } = req.query;
 
-  // Ошибка от Meta (пользователь отказал)
   if (error) {
     return sendPopupMessage(res, "oauth_error", {
       message: error_description || error
     });
   }
 
-  // Проверка state (в dev-режиме пропускается)
-  if (!validateState(state)) {
-    return sendPopupMessage(res, "oauth_error", {
-      message: "Сессия устарела — нажмите «Подключить через Meta» ещё раз"
-    });
-  }
-
   if (!code) {
-    return sendPopupMessage(res, "oauth_error", { message: "Код авторизации не получен" });
+    return sendPopupMessage(res, "oauth_error", {
+      message: "Код авторизации не получен от Meta"
+    });
   }
 
   try {
     const cfg = loadConfig();
-    const redirectUri = cfg.redirectUri && cfg.redirectUri.startsWith("http")
-      ? cfg.redirectUri
+    const redirectUri = (cfg.redirectUri || "").trim().startsWith("http")
+      ? cfg.redirectUri.trim()
       : req.protocol + "://" + req.get("host") + "/auth/callback";
 
-    // Меняем code на токен
+    // code → токен
     const { accessToken, expiresAt } = await exchangeCodeForToken({
-      code, appId: cfg.appId, appSecret: cfg.appSecret, redirectUri,
+      code,
+      appId:       cfg.appId,
+      appSecret:   cfg.appSecret,
+      redirectUri,
     });
 
-    // Получаем Instagram-аккаунты
+    // Получаем IG Business аккаунты
     const igAccounts = await getInstagramAccounts(accessToken);
 
     if (!igAccounts.length) {
       return sendPopupMessage(res, "oauth_error", {
-        message: "Instagram Business-аккаунтов не найдено.\n\nПроверьте:\n1. Аккаунт переведён в «Бизнес» или «Автор»\n2. Instagram привязан к Facebook-странице\n3. Вы выдали все запрошенные разрешения"
+        message:
+          "Instagram Business-аккаунтов не найдено.\n\n" +
+          "Проверьте:\n" +
+          "1. Аккаунт переведён в «Бизнес» или «Автор»\n" +
+          "2. Instagram привязан к Facebook-странице\n" +
+          "3. Вы выдали все запрошенные разрешения"
       });
     }
 
-    // Сохраняем аккаунты
+    // Сохраняем
     const saved = [];
     for (const acct of igAccounts) {
       const existing = cfg.accounts.find(a => a.pageId === acct.pageId);
       if (existing) {
-        // Обновляем токен существующего
         existing.token       = acct.pageToken;
         existing.tokenExpiry = expiresAt;
         existing.followers   = acct.followers;
@@ -137,8 +143,8 @@ app.get("/auth/callback", async (req, res) => {
       } else {
         const newAcct = {
           id:          Date.now() + Math.floor(Math.random() * 9999),
-          username:    acct.username    || "",
-          displayName: acct.displayName || "",
+          username:    acct.username,
+          displayName: acct.displayName,
           pageId:      acct.pageId,
           igId:        acct.igId,
           token:       acct.pageToken,
@@ -151,7 +157,6 @@ app.get("/auth/callback", async (req, res) => {
         cfg.accounts.push(newAcct);
         saved.push(newAcct);
       }
-      // Подписываем страницу на webhook
       await subscribePageWebhook(acct.pageId, acct.pageToken);
     }
 
@@ -166,11 +171,10 @@ app.get("/auth/callback", async (req, res) => {
     let msg = err.message;
     if (metaErr) {
       msg = metaErr.message || JSON.stringify(metaErr);
-      // Частые ошибки Meta — переводим
       if (msg.includes("redirect_uri")) {
-        msg = "Ошибка redirect_uri: URI в настройках должен точно совпадать с тем, что прописан в Meta App → Facebook Login → Допустимые URI перенаправления OAuth";
-      } else if (msg.includes("Invalid OAuth")) {
-        msg = "Недействительный OAuth токен. Проверьте App ID и App Secret в настройках.";
+        msg = "Ошибка redirect_uri: адрес в настройках должен точно совпадать с тем, что прописан в Meta → Facebook Login → Допустимые URI перенаправления OAuth";
+      } else if (msg.includes("Invalid OAuth access token") || msg.includes("OAuthException")) {
+        msg = "Недействительный токен. Проверьте App ID и App Secret в настройках.";
       }
     }
     console.error("[oauth] Ошибка:", err.response?.data || err.message);
@@ -239,8 +243,8 @@ app.post("/webhook", (req, res) => {
 function findScenario(scenarios, accountId, text) {
   const lower = text.toLowerCase();
   return (scenarios || []).find(s =>
-    ((s.accountIds || []).map(String)).includes(String(accountId)) &&
-    (s.keywords || []).some(k => lower.includes(k.toLowerCase()))
+    (s.accountIds || []).map(String).includes(String(accountId)) &&
+    (s.keywords   || []).some(k => lower.includes(k.toLowerCase()))
   );
 }
 
@@ -257,16 +261,21 @@ async function getUserName(token, userId) {
 
 async function replyComment(token, commentId, text) {
   try {
-    await axios.post("https://graph.facebook.com/v19.0/" + commentId + "/replies",
-      { message: text }, { params: { access_token: token } });
+    await axios.post(
+      "https://graph.facebook.com/v19.0/" + commentId + "/replies",
+      { message: text },
+      { params: { access_token: token } }
+    );
   } catch (e) { console.error("[reply]", e.response?.data?.error?.message || e.message); }
 }
 
 async function sendDM(token, pageId, userId, text) {
   try {
-    await axios.post("https://graph.facebook.com/v19.0/" + pageId + "/messages",
+    await axios.post(
+      "https://graph.facebook.com/v19.0/" + pageId + "/messages",
       { recipient: { id: userId }, message: { text }, messaging_type: "RESPONSE" },
-      { params: { access_token: token } });
+      { params: { access_token: token } }
+    );
   } catch (e) { console.error("[dm]", e.response?.data?.error?.message || e.message); }
 }
 
@@ -284,7 +293,9 @@ async function handleComment(account, scenario, replies, userId, commentId) {
   log("comment_reply", "@" + account.username, reply.slice(0, 50));
 
   await new Promise(r => setTimeout(r, 2000));
-  const dmText = scenario.dmText ? name + ", " + scenario.dmText : "Привет, " + name + "! Написали вам в директ.";
+  const dmText = scenario.dmText
+    ? name + ", " + scenario.dmText
+    : "Привет, " + name + "! Написал(а) вам в директ.";
   await sendDM(account.token, account.pageId, userId, dmText);
   log("dm_sent", "@" + account.username, "DM → " + userId);
 
@@ -294,7 +305,7 @@ async function handleComment(account, scenario, replies, userId, commentId) {
   await new Promise(r => setTimeout(r, 2500));
   if (isFollower && link) {
     await sendDM(account.token, account.pageId, userId, name + ", вот ваша ссылка:\n\n" + link);
-    userState.set(key, Object.assign({}, state, { commentReplied: true, linkSent: true }));
+    userState.set(key, { ...state, commentReplied: true, linkSent: true });
     log("link_sent", "@" + account.username, "Ссылка → " + userId);
   } else {
     if (link) {
@@ -308,8 +319,8 @@ async function handleComment(account, scenario, replies, userId, commentId) {
         if (!cur.linkSent) {
           if (cur.isFollower) {
             await sendDM(account.token, account.pageId, userId, name + ", вот ваша ссылка:\n\n" + link);
-            userState.set(key, Object.assign({}, cur, { linkSent: true }));
-            log("link_sent", "@" + account.username, "Follow-up ссылка → " + userId);
+            userState.set(key, { ...cur, linkSent: true });
+            log("link_sent", "@" + account.username, "Follow-up → " + userId);
           } else {
             await sendDM(account.token, account.pageId, userId,
               name + ", напишите «готово» после подписки — пришлю материалы");
@@ -317,21 +328,21 @@ async function handleComment(account, scenario, replies, userId, commentId) {
         }
       }, 60 * 60 * 1000);
     }
-    userState.set(key, Object.assign({}, state, { commentReplied: true, followUpTimer }));
+    userState.set(key, { ...state, commentReplied: true, followUpTimer });
   }
 }
 
 async function handleFollow(account, userId) {
   const key   = stateKey(account.id, userId);
   const state = userState.get(key) || {};
-  userState.set(key, Object.assign({}, state, { isFollower: true }));
+  userState.set(key, { ...state, isFollower: true });
   log("follow", "@" + account.username, "Новый подписчик " + userId);
 
   if (state.commentReplied && !state.linkSent && account.link) {
     const name = await getUserName(account.token, userId);
     await sendDM(account.token, account.pageId, userId, name + ", вот ваша ссылка:\n\n" + account.link);
     if (state.followUpTimer) clearTimeout(state.followUpTimer);
-    userState.set(key, Object.assign({}, userState.get(key), { linkSent: true }));
+    userState.set(key, { ...userState.get(key), linkSent: true });
     log("link_sent", "@" + account.username, "Ссылка после подписки → " + userId);
   }
 }
@@ -348,7 +359,7 @@ async function handleDM(account, userId, text) {
 
   if (isFollower && link) {
     await sendDM(account.token, account.pageId, userId, name + ", вот ваша ссылка:\n\n" + link);
-    userState.set(key, Object.assign({}, state, { linkSent: true }));
+    userState.set(key, { ...state, linkSent: true });
     log("link_sent", "@" + account.username, "Ссылка по «готово» → " + userId);
   } else if (!isFollower) {
     await sendDM(account.token, account.pageId, userId,
@@ -357,36 +368,6 @@ async function handleDM(account, userId, text) {
 }
 
 // ─── REST API ─────────────────────────────────────────────────────────────────
-
-// ─── AI ПРОКСИ ───────────────────────────────────────────────────────────────
-// FIX: OpenAI API вызывается через сервер, а не напрямую из браузера
-app.post("/api/ai", async (req, res) => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: { message: "OPENAI_API_KEY не задан в переменных окружения (.env)" } });
-  }
-
-  let body = req.body;
-  body.model = "gpt-5-mini";
-
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      body,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-        },
-      }
-    );
-    res.json(response.data);
-  } catch (err) {
-    const errData = err.response?.data || { error: { message: err.message } };
-    res.status(err.response?.status || 500).json(errData);
-  }
-});
-
 app.get("/api/config", (req, res) => {
   const cfg = loadConfig();
   res.json({
@@ -402,10 +383,10 @@ app.get("/api/config", (req, res) => {
 app.patch("/api/config/settings", (req, res) => {
   const cfg = loadConfig();
   const { appId, appSecret, redirectUri, verifyToken } = req.body;
-  if (appId       !== undefined) cfg.appId       = appId;
+  if (appId       !== undefined)                cfg.appId       = appId;
   if (appSecret   !== undefined && appSecret !== "***") cfg.appSecret = appSecret;
-  if (redirectUri !== undefined) cfg.redirectUri = redirectUri;
-  if (verifyToken !== undefined) cfg.verifyToken = verifyToken;
+  if (redirectUri !== undefined)                cfg.redirectUri = redirectUri;
+  if (verifyToken !== undefined)                cfg.verifyToken = verifyToken;
   saveConfig(cfg);
   res.json({ ok: true });
 });
@@ -463,8 +444,8 @@ app.patch("/api/config/replies", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/logs", (req, res) => res.json(eventLog.slice(0, 100)));
-app.get("/healthz",  (req, res) => res.json({ status: "ok", accounts: loadConfig().accounts.length }));
+app.get("/api/logs",  (req, res) => res.json(eventLog.slice(0, 100)));
+app.get("/healthz",   (req, res) => res.json({ status: "ok", accounts: loadConfig().accounts.length }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("IG Agent запущен: http://localhost:" + PORT));
+app.listen(PORT, () => console.log("IG Agent: http://localhost:" + PORT));

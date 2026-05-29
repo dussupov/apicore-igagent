@@ -799,97 +799,55 @@ function clearChat() {
     '</div>';
 }
 
-// FIX: AI запросы идут через серверный прокси /api/ai, а не напрямую в Anthropic
 async function aiSend() {
   if (aiThinking) return;
-
-  const input = document.getElementById('ai-input');
-  const text = input.value.trim();
-
+  var input = document.getElementById('ai-input');
+  var text  = input.value.trim();
   if (!text) return;
-
   input.value = '';
   input.style.height = 'auto';
 
   addUserMsg(text);
+  aiHistory.push({role: 'user', content: text});
 
   aiThinking = true;
   document.getElementById('ai-send-btn').disabled = true;
+  var typingId = addTyping();
 
-  const typingId = addTyping();
+  var system = 'Ты — эксперт по Instagram-маркетингу. Помогаешь настроить AI-агента для Instagram бизнес-аккаунтов.\n\n' +
+    'Контекст агента:\n' +
+    '- Аккаунты: ' + (cfg.accounts.map(function(a){return '@'+(a.username||a.displayName);}).join(', ') || 'не подключены') + '\n' +
+    '- Сценарии: ' + (cfg.scenarios.map(function(s){return s.name+'('+((s.keywords||[]).join(','))+')';}).join(' | ') || 'не настроены') + '\n' +
+    '- Ответов на комментарии: ' + cfg.commentReplies.length + '\n\n' +
+    'Правила: конкретно и кратко, без общих фраз. Тексты для Instagram — живым языком. Отвечай на русском.';
 
   try {
-    const systemPrompt = `Ты — эксперт по Instagram-маркетингу и автоматизации. Помогаешь настроить AI-агента для Instagram бизнес-аккаунтов.
-
-Контекст текущего агента:
-- Аккаунты: ${cfg.accounts.map(a => '@' + (a.username || a.displayName)).join(', ') || 'не подключены'}
-- Сценарии: ${cfg.scenarios.map(s => s.name + ' (слова: ' + s.keywords?.join(',') + ')').join(' | ') || 'не настроены'}
-- Текущих ответов на комментарии: ${cfg.commentReplies.length}
-
-Правила ответов:
-- Конкретно и кратко.
-- Никаких общих фраз.
-- Тексты для Instagram пиши живым языком.
-- Когда предлагаешь тексты — сразу давай готовые варианты.
-- Если предлагаешь что добавить в агента — говори прямо "добавь это в сценарий X".
-- Отвечай на русском.`;
-
-    const messages = [
-      {
-        role: 'system',
-        content: systemPrompt
-      },
-      {
-        role: 'user',
-        content: text
-      }
-    ];
-
-    const resp = await fetch('/api/ai', {
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        model: 'gpt-5-mini',
-        messages,
-        max_completion_tokens: 1000
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: system,
+        messages: aiHistory
       })
     });
-
-    const data = await resp.json();
-
+    var data = await resp.json();
     removeTyping(typingId);
 
     if (data.error) {
-      addBotMsg(
-              'Ошибка API: ' +
-              (data.error.message || JSON.stringify(data.error)),
-              null
-      );
-      return;
+      addBotMsg('Ошибка API: ' + (data.error.message || JSON.stringify(data.error)), null);
+      aiHistory.pop();
+    } else {
+      var reply = (data.content || []).filter(function(b){return b.type==='text';})[0];
+      var text2 = reply ? reply.text : '';
+      aiHistory.push({role: 'assistant', content: text2});
+      addBotMsg(text2, detectActions(text2));
     }
-
-    const reply =
-            data.choices?.[0]?.message?.content ||
-            data.content?.[0]?.text ||
-            '';
-
-    aiHistory.push({
-      role: 'user',
-      content: text
-    });
-
-    aiHistory.push({
-      role: 'assistant',
-      content: reply
-    });
-
-    addBotMsg(reply, detectActions(reply));
-
-  } catch (err) {
+  } catch(err) {
     removeTyping(typingId);
     addBotMsg('Ошибка соединения: ' + err.message, null);
+    aiHistory.pop();
   }
 
   aiThinking = false;
