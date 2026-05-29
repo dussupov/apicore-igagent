@@ -1,14 +1,35 @@
 const axios = require("axios");
 
-// Хранилище state-токенов для защиты от CSRF
-const pendingStates = new Set();
+// ─── ХРАНИЛИЩЕ STATE ─────────────────────────────────────────────────────────
+// Map вместо Set — храним state → timestamp, чистим старые
+const pendingStates = new Map();
 
-// Строим URL для редиректа на Meta OAuth
+function generateState() {
+  const state = "igagent_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
+  pendingStates.set(state, Date.now());
+  // чистим state старше 15 минут
+  for (const [k, ts] of pendingStates) {
+    if (Date.now() - ts > 15 * 60 * 1000) pendingStates.delete(k);
+  }
+  return state;
+}
+
+function validateState(state) {
+  if (!state) return false;
+  // В режиме разработки (без HTTPS) — пропускаем проверку state
+  // чтобы ngrok/перезапуски не ломали поток
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[oauth] dev mode — state check skipped");
+    return true;
+  }
+  if (!pendingStates.has(state)) return false;
+  pendingStates.delete(state);
+  return true;
+}
+
+// ─── СТРОИМ URL АВТОРИЗАЦИИ ───────────────────────────────────────────────────
 function buildAuthUrl({ appId, redirectUri }) {
-  const state = "igagent_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-  pendingStates.add(state);
-  setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000); // живёт 10 минут
-
+  const state  = generateState();
   const params = new URLSearchParams({
     client_id:     appId,
     redirect_uri:  redirectUri,
@@ -23,31 +44,20 @@ function buildAuthUrl({ appId, redirectUri }) {
       "business_management",
     ].join(","),
   });
-
   return {
-    url: `https://www.facebook.com/v19.0/dialog/oauth?${params}`,
+    url:   "https://www.facebook.com/v19.0/dialog/oauth?" + params.toString(),
     state,
   };
 }
 
-function validateState(state) {
-  console.log("RETURNED STATE:", state);
-  console.log("PENDING STATES:", [...pendingStates]);
-
-  if (!state) return false;
-
-  // временно для теста
-  return true;
-}
-
-// Обмен code на долгосрочный токен (60 дней)
+// ─── ОБМЕН CODE НА ТОКЕНЫ ────────────────────────────────────────────────────
 async function exchangeCodeForToken({ code, appId, appSecret, redirectUri }) {
-  // Шаг 1: code → short-lived user token
+  // code → short-lived user token
   const short = await axios.get("https://graph.facebook.com/v19.0/oauth/access_token", {
     params: { client_id: appId, client_secret: appSecret, redirect_uri: redirectUri, code },
   });
 
-  // Шаг 2: short-lived → long-lived (60 дней)
+  // short-lived → long-lived (60 дней)
   const long = await axios.get("https://graph.facebook.com/v19.0/oauth/access_token", {
     params: {
       grant_type:        "fb_exchange_token",
@@ -60,16 +70,16 @@ async function exchangeCodeForToken({ code, appId, appSecret, redirectUri }) {
   const expiresIn = long.data.expires_in || 5184000;
   return {
     accessToken: long.data.access_token,
-    expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString().slice(0, 10),
+    expiresAt:   new Date(Date.now() + expiresIn * 1000).toISOString().slice(0, 10),
   };
 }
 
-// Получаем все Facebook-страницы и их Instagram Business аккаунты
+// ─── ПОЛУЧАЕМ IG АККАУНТЫ ────────────────────────────────────────────────────
 async function getInstagramAccounts(userToken) {
   const pagesRes = await axios.get("https://graph.facebook.com/v19.0/me/accounts", {
     params: {
       access_token: userToken,
-      fields: "id,name,access_token,instagram_business_account",
+      fields:       "id,name,access_token,instagram_business_account",
     },
   });
 
@@ -78,33 +88,44 @@ async function getInstagramAccounts(userToken) {
     if (!page.instagram_business_account) continue;
 
     const igId = page.instagram_business_account.id;
-    const igRes = await axios.get(`https://graph.facebook.com/v19.0/${igId}`, {
-      params: {
-        fields: "id,username,profile_picture_url,followers_count",
-        access_token: page.access_token,
-      },
-    });
+    let igData = {};
+    try {
+      const r = await axios.get("https://graph.facebook.com/v19.0/" + igId, {
+        params: {
+          fields:       "id,username,profile_picture_url,followers_count",
+          access_token: page.access_token,
+        },
+      });
+      igData = r.data;
+    } catch (e) {
+      console.warn("Не удалось получить данные IG аккаунта:", e.message);
+    }
 
     accounts.push({
       igId,
-      username:    igRes.data.username,
+      username:    igData.username    || null,
       displayName: page.name,
       pageId:      page.id,
       pageToken:   page.access_token,
-      followers:   igRes.data.followers_count || 0,
-      avatar:      igRes.data.profile_picture_url || null,
+      followers:   igData.followers_count || 0,
+      avatar:      igData.profile_picture_url || null,
     });
   }
   return accounts;
 }
 
-// Подписываем Facebook-страницу на webhook-события
+// ─── ПОДПИСКА СТРАНИЦЫ НА WEBHOOK ────────────────────────────────────────────
 async function subscribePageWebhook(pageId, pageToken) {
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${pageId}/subscribed_apps`,
-    { subscribed_fields: ["comments", "messages", "follows"] },
-    { params: { access_token: pageToken } }
-  );
+  try {
+    await axios.post(
+      "https://graph.facebook.com/v19.0/" + pageId + "/subscribed_apps",
+      { subscribed_fields: ["comments", "messages", "follows"] },
+      { params: { access_token: pageToken } }
+    );
+    console.log("[webhook] Подписка активирована для страницы", pageId);
+  } catch (e) {
+    console.warn("[webhook] Ошибка подписки для", pageId, ":", e.response?.data?.error?.message || e.message);
+  }
 }
 
 module.exports = { buildAuthUrl, validateState, exchangeCodeForToken, getInstagramAccounts, subscribePageWebhook };
