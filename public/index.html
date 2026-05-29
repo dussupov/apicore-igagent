@@ -762,61 +762,94 @@ function clearChat() {
 // FIX: AI запросы идут через серверный прокси /api/ai, а не напрямую в Anthropic
 async function aiSend() {
   if (aiThinking) return;
+
   const input = document.getElementById('ai-input');
   const text = input.value.trim();
+
   if (!text) return;
 
   input.value = '';
   input.style.height = 'auto';
+
   addUserMsg(text);
-  aiHistory.push({ role: 'user', content: text });
 
   aiThinking = true;
   document.getElementById('ai-send-btn').disabled = true;
+
   const typingId = addTyping();
 
   try {
     const systemPrompt = `Ты — эксперт по Instagram-маркетингу и автоматизации. Помогаешь настроить AI-агента для Instagram бизнес-аккаунтов.
 
 Контекст текущего агента:
-- Аккаунты: ${cfg.accounts.map(a=>'@'+(a.username||a.displayName)).join(', ') || 'не подключены'}
-- Сценарии: ${cfg.scenarios.map(s=>s.name+' (слова: '+s.keywords?.join(',')+')').join(' | ') || 'не настроены'}
+- Аккаунты: ${cfg.accounts.map(a => '@' + (a.username || a.displayName)).join(', ') || 'не подключены'}
+- Сценарии: ${cfg.scenarios.map(s => s.name + ' (слова: ' + s.keywords?.join(',') + ')').join(' | ') || 'не настроены'}
 - Текущих ответов на комментарии: ${cfg.commentReplies.length}
 
 Правила ответов:
-- Конкретно и кратко. Никаких общих фраз.
-- Тексты для Instagram пиши живым языком — как пишут реальные люди, без корпоративщины
-- Когда предлагаешь тексты — сразу давай готовые варианты, без объяснений зачем
-- Если предлагаешь что добавить в агента — говори прямо "добавь это в сценарий X"
-- Отвечай на русском`;
+- Конкретно и кратко.
+- Никаких общих фраз.
+- Тексты для Instagram пиши живым языком.
+- Когда предлагаешь тексты — сразу давай готовые варианты.
+- Если предлагаешь что добавить в агента — говори прямо "добавь это в сценарий X".
+- Отвечай на русском.`;
 
-    // FIX: используем серверный прокси вместо прямого вызова Anthropic API
+    const messages = [
+      {
+        role: 'system',
+        content: systemPrompt
+      },
+      {
+        role: 'user',
+        content: text
+      }
+    ];
+
     const resp = await fetch('/api/ai', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         model: 'gpt-5-mini',
-        max_tokens: 1000,
-        system: systemPrompt,
-        messages: aiHistory,
-      }),
+        messages,
+        max_completion_tokens: 1000
+      })
     });
 
     const data = await resp.json();
+
     removeTyping(typingId);
 
     if (data.error) {
-      addBotMsg('Ошибка API: ' + (data.error.message || JSON.stringify(data.error)), null);
-      aiHistory.pop();
-    } else {
-      const reply = data.content?.find(b => b.type === 'text')?.text || '';
-      aiHistory.push({ role: 'assistant', content: reply });
-      addBotMsg(reply, detectActions(reply));
+      addBotMsg(
+              'Ошибка API: ' +
+              (data.error.message || JSON.stringify(data.error)),
+              null
+      );
+      return;
     }
+
+    const reply =
+            data.choices?.[0]?.message?.content ||
+            data.content?.[0]?.text ||
+            '';
+
+    aiHistory.push({
+      role: 'user',
+      content: text
+    });
+
+    aiHistory.push({
+      role: 'assistant',
+      content: reply
+    });
+
+    addBotMsg(reply, detectActions(reply));
+
   } catch (err) {
     removeTyping(typingId);
     addBotMsg('Ошибка соединения: ' + err.message, null);
-    aiHistory.pop();
   }
 
   aiThinking = false;
