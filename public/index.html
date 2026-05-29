@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IG Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<style>
+:root{--bg:#0e0e10;--bg2:#16161a;--bg3:#1e1e24;--border:rgba(255,255,255,.08);--border2:rgba(255,255,255,.14);--text:#f0f0f2;--text2:#8a8a9a;--text3:#52525e;--accent:#7c6af7;--accent2:#5b4dd6;--abg:rgba(124,106,247,.12);--green:#22c55e;--gbg:rgba(34,197,94,.1);--amber:#f59e0b;--ambg:rgba(245,158,11,.1);--red:#ef4444;--rbg:rgba(239,68,68,.1);--r:10px;--rl:14px;--font:'Manrope',sans-serif;--mono:'IBM Plex Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;display:flex;font-size:14px;line-height:1.5}
+.sidebar{width:220px;min-width:220px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;z-index:100}
+.sidebar-logo{padding:20px 18px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:15px;color:#fff}
+.logo-text{font-size:14px;font-weight:700}
+.logo-sub{font-size:11px;color:var(--text3);font-family:var(--mono)}
+.nav{padding:10px 8px;flex:1}
+.nav-item{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text2);border:none;background:none;width:100%;transition:all .15s;font-family:var(--font)}
+.nav-item:hover{background:var(--bg3);color:var(--text)}
+.nav-item.active{background:var(--abg);color:var(--accent)}
+.nav-item i{font-size:17px}
+.nav-section{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 10px 6px}
+.sa-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px}
+.sa-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.sa-dot.on{background:var(--green)}
+.sa-dot.off{background:var(--text3)}
+.sa-name{font-size:12px;color:var(--text2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);font-family:var(--mono)}
+.main{margin-left:220px;flex:1;min-height:100vh;overflow-y:auto}
+.topbar{padding:16px 26px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--bg);z-index:50}
+.page-title{font-size:17px;font-weight:700;letter-spacing:-.3px}
+.content{padding:22px 26px}
+.page{display:none}
+.page.active{display:block}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:8px 15px;font-size:13px;font-weight:600;border-radius:8px;border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;transition:all .15s;font-family:var(--font)}
+.btn:hover{background:var(--bg2);color:#fff}
+.btn:active{transform:scale(.98)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent2);border-color:var(--accent2)}
+.btn.fb{background:#1877F2;border-color:#1877F2;color:#fff}
+.btn.fb:hover{background:#1560cc}
+.btn.danger{color:var(--red);border-color:rgba(239,68,68,.3)}
+.btn.danger:hover{background:var(--rbg)}
+.btn.sm{padding:5px 11px;font-size:12px}
+.btn.xs{padding:3px 8px;font-size:11px}
+.btn[disabled]{opacity:.4;pointer-events:none}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:18px 20px;margin-bottom:14px}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.card-title{font-size:14px;font-weight:700}
+input[type=text],input[type=url],input[type=password],textarea,select{width:100%;padding:8px 11px;font-size:13px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:var(--font);outline:none;transition:border .15s}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+textarea{resize:vertical;min-height:68px;line-height:1.5}
+select option{background:var(--bg2)}
+label{font-size:12px;color:var(--text2);display:block;margin-bottom:5px;font-weight:500}
+.field{margin-bottom:13px}
+.field-row{display:flex;gap:12px}
+.field-row .field{flex:1}
+.field-hint{font-size:11px;color:var(--text3);margin-top:4px}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;font-family:var(--mono)}
+.badge.green{background:var(--gbg);color:var(--green)}
+.badge.amber{background:var(--ambg);color:var(--amber)}
+.badge.gray{background:rgba(255,255,255,.06);color:var(--text2)}
+.badge.purple{background:var(--abg);color:var(--accent)}
+.badge.red{background:var(--rbg);color:var(--red)}
+.toggle{width:34px;height:19px;border-radius:10px;border:1px solid var(--border2);cursor:pointer;position:relative;background:var(--bg3);transition:background .15s;flex-shrink:0}
+.toggle.on{background:var(--accent);border-color:var(--accent)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:left .15s}
+.toggle.on::after{left:17px}
+.tag{display:inline-flex;align-items:center;gap:4px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;color:var(--text2)}
+.tag.kw{background:var(--abg);border-color:rgba(124,106,247,.3);color:var(--accent)}
+.tag button{background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;padding:0;display:flex;align-items:center}
+.tag button:hover{color:var(--red)}
+.tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:14px 17px}
+.stat-label{font-size:11px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.stat-val{font-size:26px;font-weight:700;letter-spacing:-.5px}
+.stat-val.green{color:var(--green)}
+.stat-val.accent{color:var(--accent)}
+.log-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
+.log-row:last-child{border:none}
+.log-dot{width:6px;height:6px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.log-dot.ok{background:var(--green)}
+.log-dot.warn{background:var(--amber)}
+.log-dot.err{background:var(--red)}
+.log-time{font-family:var(--mono);font-size:11px;color:var(--text3);white-space:nowrap;min-width:46px;margin-top:2px}
+.log-acct{font-size:12px;color:var(--accent);white-space:nowrap;min-width:100px;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.log-msg{font-size:13px;color:var(--text2);flex:1;line-height:1.4}
+.acct-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:16px 18px;margin-bottom:12px;transition:border .15s}
+.acct-card:hover{border-color:var(--border2)}
+.acct-row{display:flex;align-items:center;gap:12px}
+.avatar{width:42px;height:42px;border-radius:50%;background:var(--abg);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:var(--accent);flex-shrink:0;overflow:hidden}
+.avatar img{width:100%;height:100%;object-fit:cover}
+.acct-name{font-size:14px;font-weight:700}
+.acct-meta{font-size:12px;color:var(--text2);margin-top:3px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.divider{height:1px;background:var(--border);margin:13px 0}
+.token-box{font-family:var(--mono);font-size:11px;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;display:inline-block}
+.scenario{border:1px solid var(--border);border-radius:var(--rl);margin-bottom:10px;overflow:hidden}
+.sc-head{display:flex;align-items:center;gap:10px;padding:13px 16px;background:var(--bg2);cursor:pointer;transition:background .1s}
+.sc-head:hover{background:var(--bg3)}
+.sc-title{flex:1;font-size:14px;font-weight:600}
+.sc-body{padding:16px 18px;background:var(--bg);display:none}
+.sc-body.open{display:block}
+.reply-item{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:8px}
+.reply-text{flex:1;font-size:13px;color:var(--text2);line-height:1.5}
+.settings-section{margin-bottom:24px}
+.settings-section-title{font-size:13px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.copy-hint{font-size:11px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);word-break:break-all;margin-top:6px;cursor:pointer;transition:border .15s}
+.copy-hint:hover{border-color:var(--accent);color:var(--accent)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:999;backdrop-filter:blur(4px)}
+.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--rl);padding:26px;width:430px;max-width:95vw}
+.modal-title{font-size:17px;font-weight:700;margin-bottom:4px}
+.modal-sub{font-size:13px;color:var(--text2);margin-bottom:20px}
+.step-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:11px}
+.step-num{width:22px;height:22px;border-radius:50%;border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--text2);flex-shrink:0}
+.step-num.active{background:var(--abg);border-color:var(--accent);color:var(--accent)}
+.step-num.done{background:var(--gbg);border-color:var(--green);color:var(--green)}
+.step-text{font-size:13px;color:var(--text2);padding-top:2px}
+.perm-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
+.perm{font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:3px 8px;color:var(--text2);font-family:var(--mono)}
+.success-icon{width:56px;height:56px;border-radius:50%;background:var(--gbg);border:1px solid var(--green);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-size:24px;color:var(--green)}
+.empty{text-align:center;padding:40px 20px;color:var(--text3)}
+.empty i{font-size:32px;display:block;margin-bottom:10px}
+.row-end{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+#toast{position:fixed;bottom:24px;right:24px;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:11px 17px;font-size:13px;color:var(--text);z-index:9999;transform:translateY(60px);opacity:0;transition:all .25s;max-width:320px}
+#toast.show{transform:translateY(0);opacity:1}
+#toast.green{border-color:var(--green);color:var(--green)}
+#toast.red{border-color:var(--red);color:var(--red)}
+
+/* ── AI PAGE ── */
+.ai-wrap{display:flex;gap:16px;height:calc(100vh - 120px);min-height:500px}
+.ai-sidebar{width:230px;min-width:230px;display:flex;flex-direction:column;gap:10px}
+.ai-chat-col{flex:1;display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);overflow:hidden}
+.ai-quick-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:14px}
+.ai-quick-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:10px}
+.ai-quick-btn{display:flex;align-items:flex-start;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:transparent;color:var(--text2);font-size:12px;font-family:var(--font);cursor:pointer;transition:all .15s;margin-bottom:6px;line-height:1.4}
+.ai-quick-btn:last-child{margin-bottom:0}
+.ai-quick-btn:hover{background:var(--bg3);border-color:var(--border2);color:var(--text)}
+.ai-quick-btn i{font-size:14px;margin-top:1px;flex-shrink:0;color:var(--accent)}
+.ai-context-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:14px;flex:1}
+.ai-context-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:10px}
+.ai-context-item{font-size:12px;color:var(--text2);padding:5px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.ai-context-item:last-child{border:none}
+.ai-chat-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.ai-chat-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px}
+.ai-status{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.ai-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.ai-msg{display:flex;gap:10px;align-items:flex-start;max-width:100%}
+.ai-msg.user{flex-direction:row-reverse}
+.ai-bubble{padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.6;max-width:80%}
+.ai-msg.user .ai-bubble{background:var(--accent);color:#fff;border-radius:12px 12px 3px 12px}
+.ai-msg.bot .ai-bubble{background:var(--bg3);color:var(--text);border-radius:12px 12px 12px 3px;border:1px solid var(--border)}
+.ai-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;margin-top:2px}
+.ai-msg.bot .ai-avatar{background:var(--abg);color:var(--accent)}
+.ai-msg.user .ai-avatar{background:var(--bg3);color:var(--text2)}
+.ai-bubble pre{font-family:var(--mono);font-size:12px;background:rgba(0,0,0,.25);border-radius:6px;padding:10px;margin:8px 0;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+.ai-bubble ul{padding-left:16px;margin:4px 0}
+.ai-bubble li{margin-bottom:3px}
+.ai-bubble strong{color:#fff;font-weight:600}
+.ai-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+.ai-action-btn{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;font-size:11px;border-radius:6px;border:1px solid var(--accent);background:var(--abg);color:var(--accent);cursor:pointer;font-family:var(--font);transition:all .15s}
+.ai-action-btn:hover{background:var(--accent);color:#fff}
+.ai-typing{display:flex;gap:4px;align-items:center;padding:10px 14px;background:var(--bg3);border-radius:12px;border:1px solid var(--border);width:fit-content}
+.ai-typing span{width:6px;height:6px;border-radius:50%;background:var(--text3);animation:typing 1.2s infinite}
+.ai-typing span:nth-child(2){animation-delay:.2s}
+.ai-typing span:nth-child(3){animation-delay:.4s}
+@keyframes typing{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
+.ai-input-row{padding:12px 14px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end}
+.ai-input-row textarea{flex:1;min-height:40px;max-height:120px;resize:none;border-color:var(--border);background:var(--bg)}
+.ai-send-btn{width:40px;height:40px;border-radius:8px;background:var(--accent);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;transition:background .15s}
+.ai-send-btn:hover{background:var(--accent2)}
+.ai-send-btn:disabled{opacity:.4;cursor:not-allowed}
+.result-block{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px;font-family:var(--mono);color:var(--text2);line-height:1.6}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon"><i class="ti ti-brand-instagram"></i></div>
+    <div><div class="logo-text">IG Agent</div><div class="logo-sub">v1.0</div></div>
+  </div>
+  <nav class="nav">
+    <button class="nav-item active" onclick="go('dashboard')" id="nav-dashboard"><i class="ti ti-layout-dashboard"></i> Обзор</button>
+    <button class="nav-item" onclick="go('accounts')" id="nav-accounts"><i class="ti ti-brand-instagram"></i> Аккаунты</button>
+    <button class="nav-item" onclick="go('scenarios')" id="nav-scenarios"><i class="ti ti-git-branch"></i> Сценарии</button>
+    <button class="nav-item" onclick="go('replies')" id="nav-replies"><i class="ti ti-message-2"></i> Ответы</button>
+    <button class="nav-item" onclick="go('logs')" id="nav-logs"><i class="ti ti-list-details"></i> Логи</button>
+    <button class="nav-item" onclick="go('ai')" id="nav-ai"><i class="ti ti-sparkles"></i> AI Помощник</button>
+    <button class="nav-item" onclick="go('settings')" id="nav-settings"><i class="ti ti-settings"></i> Настройки</button>
+    <div class="nav-section">Аккаунты</div>
+    <div id="sidebar-accts"></div>
+  </nav>
+  <div class="sidebar-footer">● agent online</div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div class="page-title" id="topbar-title">Обзор</div>
+    <div id="topbar-actions"></div>
+  </div>
+  <div class="content">
+
+    <!-- ОБЗОР -->
+    <div class="page active" id="page-dashboard">
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-label">Аккаунтов</div><div class="stat-val accent" id="s-accts">0</div><div style="font-size:11px;color:var(--text3);margin-top:3px">активных</div></div>
+        <div class="stat"><div class="stat-label">Сценариев</div><div class="stat-val" id="s-scenes">0</div></div>
+        <div class="stat"><div class="stat-label">DM сегодня</div><div class="stat-val green" id="s-dm">0</div></div>
+        <div class="stat"><div class="stat-label">Вариантов ответа</div><div class="stat-val" id="s-rep">0</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="card-title">Последние события</div><span class="badge green">live</span></div>
+        <div id="dash-log"><div class="empty"><i class="ti ti-activity"></i>Событий ещё нет</div></div>
+      </div>
+    </div>
+
+    <!-- АККАУНТЫ -->
+    <div class="page" id="page-accounts">
+      <div id="accounts-list"></div>
+    </div>
+
+    <!-- СЦЕНАРИИ -->
+    <div class="page" id="page-scenarios">
+      <div id="scenarios-list"></div>
+    </div>
+
+    <!-- ОТВЕТЫ -->
+    <div class="page" id="page-replies">
+      <div class="card">
+        <div class="card-head"><div class="card-title">Варианты ответов на комментарий</div><span class="badge gray">случайный выбор</span></div>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Агент выбирает один случайно. Разные длина и стиль снижают вероятность блокировки.</p>
+        <div id="replies-list"></div>
+        <div style="display:flex;gap:8px;align-items:flex-end;margin-top:12px">
+          <div style="flex:1"><textarea id="new-reply-text" placeholder="Напишите вариант ответа..." style="min-height:50px"></textarea></div>
+          <button class="btn primary" style="flex-shrink:0;height:50px" onclick="addReply()"><i class="ti ti-plus"></i> Добавить</button>
+        </div>
+        <p style="font-size:11px;color:var(--text3);margin-top:8px">Совет: без восклицательных знаков подряд, разная длина фраз, живой тон</p>
+        <div class="row-end"><button class="btn primary" onclick="saveReplies()"><i class="ti ti-check"></i> Сохранить</button></div>
+      </div>
+    </div>
+
+    <!-- ЛОГИ -->
+    <div class="page" id="page-logs">
+      <div class="card">
+        <div class="card-head"><div class="card-title">Логи событий</div><button class="btn sm" onclick="loadLogs()"><i class="ti ti-refresh"></i> Обновить</button></div>
+        <div id="full-log"><div class="empty"><i class="ti ti-list-details"></i>Загружаем...</div></div>
+      </div>
+    </div>
+
+    <!-- AI ПОМОЩНИК -->
+    <div class="page" id="page-ai">
+      <div class="ai-wrap">
+        <div class="ai-sidebar">
+          <div class="ai-quick-card">
+            <div class="ai-quick-title">Быстрые действия</div>
+            <button class="ai-quick-btn" onclick="aiQuick('scenarios')"><i class="ti ti-git-branch"></i>Придумать сценарии для моей ниши</button>
+            <button class="ai-quick-btn" onclick="aiQuick('keywords')"><i class="ti ti-tag"></i>Подобрать ключевые слова</button>
+            <button class="ai-quick-btn" onclick="aiQuick('replies')"><i class="ti ti-message-2"></i>Написать 8 ответов на комментарии</button>
+            <button class="ai-quick-btn" onclick="aiQuick('dm')"><i class="ti ti-send"></i>Написать DM для сценариев</button>
+            <button class="ai-quick-btn" onclick="aiQuick('followup')"><i class="ti ti-clock"></i>Написать follow-up сообщение</button>
+            <button class="ai-quick-btn" onclick="aiQuick('audit')"><i class="ti ti-eye"></i>Проверить текущие настройки</button>
+          </div>
+          <div class="ai-context-card">
+            <div class="ai-context-title">Контекст агента</div>
+            <div id="ai-context-list"><div style="font-size:12px;color:var(--text3)">Загружаем...</div></div>
+          </div>
+        </div>
+
+        <div class="ai-chat-col">
+          <div class="ai-chat-header">
+            <div class="ai-chat-title">
+              <div class="ai-status"></div>
+              Claude AI
+            </div>
+            <button class="btn xs" onclick="clearChat()"><i class="ti ti-trash" style="font-size:12px"></i> Очистить</button>
+          </div>
+          <div class="ai-messages" id="ai-messages">
+            <div class="ai-msg bot">
+              <div class="ai-avatar"><i class="ti ti-sparkles"></i></div>
+              <div>
+                <div class="ai-bubble">Привет! Я помогу тебе настроить Instagram-агента.<br><br>Могу написать сценарии автоответов, подобрать ключевые слова, придумать фразы для комментариев и DM — всё что нужно.<br><br>Расскажи про свой бизнес или выбери действие слева.</div>
+              </div>
+            </div>
+          </div>
+          <div class="ai-input-row">
+            <textarea id="ai-input" placeholder="Напишите запрос или выберите действие слева..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();aiSend()}"></textarea>
+            <button class="ai-send-btn" id="ai-send-btn" onclick="aiSend()"><i class="ti ti-send"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- НАСТРОЙКИ -->
+    <div class="page" id="page-settings">
+      <div class="card">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Данные из Meta for Developers</div>
+
+          <div class="field">
+            <label>ID приложения Instagram</label>
+            <input type="text" id="s-appId" placeholder="Например: 1297520525911467">
+            <div class="field-hint">Meta for Developers → ваше приложение → Настройки → Основные → <strong>Идентификатор приложения</strong></div>
+          </div>
+
+          <div class="field">
+            <label>Секрет приложения Instagram</label>
+            <input type="password" id="s-appSecret" placeholder="32-символьная строка">
+            <div class="field-hint">Meta for Developers → Настройки → Основные → <strong>Секрет приложения</strong> → нажмите "Показать"</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Webhook и OAuth</div>
+
+          <div class="field">
+            <label>URL для перенаправления OAuth (Redirect URI)</label>
+            <input type="url" id="s-redirectUri" placeholder="https://ваш-домен.com/auth/callback">
+            <div class="field-hint">Meta for Developers → Facebook Login → Настройки → <strong>Допустимые URI перенаправления OAuth</strong></div>
+          </div>
+
+          <div class="field">
+            <label>Токен подтверждения Webhook (Verify Token)</label>
+            <input type="text" id="s-verifyToken" placeholder="Придумайте любую строку, например: igagent_secret_2024">
+            <div class="field-hint">Meta for Developers → Webhooks → при добавлении подписки → поле <strong>"Токен подтверждения"</strong></div>
+          </div>
+
+          <div class="field">
+            <label>URL Webhook (скопируйте в Meta)</label>
+            <div class="copy-hint" id="webhook-url" onclick="copyWebhookUrl()" title="Нажмите чтобы скопировать">
+              — запустите сервер чтобы увидеть URL —
+            </div>
+            <div class="field-hint">Meta for Developers → Webhooks → <strong>"URL обратного вызова"</strong></div>
+          </div>
+        </div>
+
+        <div class="row-end">
+          <button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Сохранить настройки</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">Инструкция по настройке Meta</div></div>
+        <div style="font-size:13px;color:var(--text2);line-height:1.9">
+          <p style="margin-bottom:10px"><strong style="color:var(--text)">Шаг 1.</strong> Перейти на <a href="https://developers.facebook.com" target="_blank" style="color:var(--accent)">developers.facebook.com</a> → <em>Мои приложения → ваше приложение</em></p>
+          <p style="margin-bottom:10px"><strong style="color:var(--text)">Шаг 2.</strong> <em>Настройки → Основные</em> → скопировать <strong>ID приложения</strong> и <strong>Секрет приложения</strong></p>
+          <p style="margin-bottom:10px"><strong style="color:var(--text)">Шаг 3.</strong> <em>Facebook Login for Business → Настройки → Допустимые URI перенаправления OAuth</em> → добавить URL из поля выше</p>
+          <p style="margin-bottom:10px"><strong style="color:var(--text)">Шаг 4.</strong> <em>Webhooks → Подписаться на поля страницы</em> → вставить URL webhook и токен подтверждения → подписаться на: <code style="font-family:var(--mono);font-size:12px">comments, messages, follows</code></p>
+          <p><strong style="color:var(--text)">Шаг 5.</strong> Перейти в <em>Аккаунты</em> → нажать <em>Подключить через Meta</em></p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- OAUTH MODAL -->
+<div class="modal-overlay" id="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let cfg = { accounts:[], scenarios:[], commentReplies:[], appId:'', appSecret:'', redirectUri:'', verifyToken:'' };
+let openScenarios = new Set();
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  try {
+    const r = await fetch(path, { method, headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+    return r.json();
+  } catch { toast('Ошибка соединения с сервером','red'); return null; }
+}
+
+async function loadConfig() {
+  const d = await api('GET','/api/config');
+  if (d) { cfg = d; render(); }
+}
+
+async function loadLogs() {
+  const d = await api('GET','/api/logs');
+  if (d) renderLogs(d);
+}
+
+// ─── НАВИГАЦИЯ ────────────────────────────────────────────────────────────────
+const TITLES = { dashboard:'Обзор', accounts:'Аккаунты', scenarios:'Сценарии', replies:'Ответы', logs:'Логи событий', ai:'AI Помощник', settings:'Настройки' };
+
+function go(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const page = document.getElementById('page-'+name);
+  const nav  = document.getElementById('nav-'+name);
+  if (!page || !nav) return;
+  page.classList.add('active');
+  nav.classList.add('active');
+  document.getElementById('topbar-title').textContent = TITLES[name] || name;
+  renderActions(name);
+  if (name === 'logs') loadLogs();
+  if (name === 'settings') fillSettings();
+  if (name === 'ai') renderAiContext();
+}
+
+function renderActions(name) {
+  const el = document.getElementById('topbar-actions');
+  const actions = {
+    accounts: `<button class="btn fb" onclick="startOAuth()"><svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg> Подключить через Meta</button>`,
+    scenarios: `<button class="btn primary" onclick="addScenario()"><i class="ti ti-plus"></i> Новый сценарий</button>`,
+  };
+  el.innerHTML = actions[name] || '';
+}
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+function render() {
+  document.getElementById('sidebar-accts').innerHTML = cfg.accounts.map(a =>
+    `<div class="sa-item"><div class="sa-dot ${a.active?'on':'off'}"></div><div class="sa-name">${a.username ? '@'+a.username : a.displayName}</div></div>`
+  ).join('');
+  document.getElementById('s-accts').textContent = cfg.accounts.filter(a=>a.active).length;
+  document.getElementById('s-scenes').textContent = cfg.scenarios.length;
+  document.getElementById('s-rep').textContent = cfg.commentReplies.length;
+  renderAccounts();
+  renderScenarios();
+  renderReplies();
+  renderAiContext();
+}
+
+function renderAccounts() {
+  const el = document.getElementById('accounts-list');
+  if (!cfg.accounts.length) {
+    el.innerHTML = `<div class="empty"><i class="ti ti-brand-instagram"></i><br>Нет аккаунтов. Нажмите «Подключить через Meta».</div>`;
+    return;
+  }
+  el.innerHTML = cfg.accounts.map(a => {
+    const exp = new Date(a.tokenExpiry);
+    const days = Math.ceil((exp - Date.now()) / 86400000);
+    const expBadge = isNaN(days) ? '' : days > 30
+      ? `<span class="badge green">токен активен · ${days} дн.</span>`
+      : days > 0 ? `<span class="badge amber">истекает через ${days} дн.</span>`
+      : `<span class="badge red">токен истёк</span>`;
+    const initials = (a.username || a.displayName || 'IG').slice(0,2).toUpperCase();
+    return `
+    <div class="acct-card">
+      <div class="acct-row">
+        <div class="avatar">${a.avatar ? `<img src="${a.avatar}">` : initials}</div>
+        <div style="flex:1;min-width:0">
+          <div class="acct-name">${a.username ? '@'+a.username : a.displayName}</div>
+          <div class="acct-meta">${expBadge}<span class="badge purple">${a.displayName||''}</span></div>
+        </div>
+        <div class="toggle ${a.active?'on':''}" onclick="toggleAcct('${a.id}')" title="Вкл/выкл"></div>
+        <button class="btn sm danger" onclick="removeAcct('${a.id}')"><i class="ti ti-unlink"></i></button>
+      </div>
+      <div class="divider"></div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <div style="flex:1;min-width:200px">
+          <div class="field" style="margin-bottom:0">
+            <label>Ссылка для подписчиков</label>
+            <input type="url" value="${a.link||''}" placeholder="https://..." onchange="updateAcctLink('${a.id}',this.value)">
+          </div>
+        </div>
+        <div>
+          <label>Токен</label>
+          <div class="token-box">${a.token||'—'}</div>
+          <div style="margin-top:6px"><button class="btn xs" onclick="refreshToken('${a.id}')"><i class="ti ti-refresh" style="font-size:12px"></i> Обновить</button></div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderScenarios() {
+  const el = document.getElementById('scenarios-list');
+  if (!cfg.scenarios.length) {
+    el.innerHTML = `<div class="empty"><i class="ti ti-git-branch"></i><br>Нет сценариев. Нажмите «Новый сценарий».</div>`;
+    return;
+  }
+  el.innerHTML = cfg.scenarios.map(s => {
+    const open = openScenarios.has(s.id);
+    const acctOpts = cfg.accounts.map(a =>
+      `<option value="${a.id}" ${(s.accountIds||[]).includes(a.id)?'selected':''}>${a.username?'@'+a.username:a.displayName}</option>`
+    ).join('');
+    return `
+    <div class="scenario">
+      <div class="sc-head" onclick="toggleSc(${s.id})">
+        <i class="ti ti-git-branch" style="font-size:15px;color:var(--accent)"></i>
+        <div class="sc-title">${s.name}</div>
+        <span class="badge gray">${(s.keywords||[]).length} слов</span>
+        <i class="ti ti-chevron-${open?'up':'down'}" style="font-size:14px;color:var(--text3)"></i>
+      </div>
+      <div class="sc-body ${open?'open':''}">
+        <div class="field"><label>Название сценария</label><input type="text" value="${s.name}" onchange="updateSc(${s.id},'name',this.value)"></div>
+        <div class="field">
+          <label>Ключевые слова (агент реагирует, если слово есть в комментарии)</label>
+          <div class="tag-list" id="kw-${s.id}">${(s.keywords||[]).map(k=>`<span class="tag kw">${k}<button onclick="removeKw(${s.id},'${k}')"><i class="ti ti-x" style="font-size:11px"></i></button></span>`).join('')}</div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <input type="text" id="kw-inp-${s.id}" placeholder="Добавить слово..." style="max-width:180px" onkeydown="if(event.key==='Enter')addKw(${s.id})">
+            <button class="btn sm" onclick="addKw(${s.id})"><i class="ti ti-plus"></i></button>
+          </div>
+        </div>
+        <div class="field"><label>Текст первого DM (личного сообщения)</label><textarea onchange="updateSc(${s.id},'dmText',this.value)">${s.dmText||''}</textarea></div>
+        <div class="field"><label>Применять к аккаунтам</label><select multiple style="height:80px" onchange="updateScAccts(${s.id},this)">${acctOpts}</select></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+          <div class="toggle ${s.followUp?'on':''}" onclick="toggleFollowUp(${s.id})"></div>
+          <span style="font-size:13px;color:var(--text2)">Follow-up через 1 час если не подписался</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <button class="btn sm danger" onclick="removeSc(${s.id})"><i class="ti ti-trash"></i> Удалить</button>
+          <button class="btn sm primary" onclick="saveScenarios()"><i class="ti ti-check"></i> Сохранить</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderReplies() {
+  const el = document.getElementById('replies-list');
+  el.innerHTML = cfg.commentReplies.length
+    ? cfg.commentReplies.map((r,i) => `
+      <div class="reply-item">
+        <div class="reply-text">${r}</div>
+        <button class="btn xs" onclick="editReply(${i})"><i class="ti ti-edit" style="font-size:12px"></i></button>
+        <button class="btn xs danger" onclick="removeReply(${i})"><i class="ti ti-trash" style="font-size:12px"></i></button>
+      </div>`).join('')
+    : `<div style="color:var(--text3);font-size:13px;padding:12px 0">Нет вариантов. Добавьте первый.</div>`;
+}
+
+function renderLogs(logs) {
+  const html = logs.length ? logs.map(l => {
+    const t = new Date(l.time).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'});
+    const cls = l.ok===false ? 'err' : 'ok';
+    return `<div class="log-row"><div class="log-dot ${cls}"></div><div class="log-time">${t}</div><div class="log-acct">${l.account||l.target||''}</div><div class="log-msg">${l.message}</div></div>`;
+  }).join('') : `<div class="empty"><i class="ti ti-list-details"></i>Событий ещё нет</div>`;
+
+  const fullLog = document.getElementById('full-log');
+  if (fullLog) fullLog.innerHTML = html;
+
+  const dashLog = document.getElementById('dash-log');
+  if (dashLog) dashLog.innerHTML = html || `<div class="empty"><i class="ti ti-activity"></i>Событий ещё нет</div>`;
+
+  document.getElementById('s-dm').textContent = logs.filter(l=>l.type==='dm_sent').length;
+}
+
+// ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
+function fillSettings() {
+  document.getElementById('s-appId').value       = cfg.appId || '';
+  document.getElementById('s-appSecret').value   = (cfg.appSecret && cfg.appSecret !== '***') ? cfg.appSecret : '';
+  document.getElementById('s-redirectUri').value  = cfg.redirectUri || '';
+  document.getElementById('s-verifyToken').value  = cfg.verifyToken || '';
+  const wurl = document.getElementById('webhook-url');
+  if (wurl) wurl.textContent = window.location.origin + '/webhook';
+}
+
+async function saveSettings() {
+  const body = {
+    appId:       document.getElementById('s-appId').value.trim(),
+    appSecret:   document.getElementById('s-appSecret').value.trim(),
+    redirectUri: document.getElementById('s-redirectUri').value.trim(),
+    verifyToken: document.getElementById('s-verifyToken').value.trim(),
+  };
+  const r = await api('PATCH','/api/config/settings', body);
+  if (r?.ok) { toast('Настройки сохранены','green'); loadConfig(); }
+}
+
+function copyWebhookUrl() {
+  const url = window.location.origin + '/webhook';
+  navigator.clipboard.writeText(url).then(() => toast('URL скопирован','green'));
+}
+
+// ─── АККАУНТЫ ─────────────────────────────────────────────────────────────────
+async function toggleAcct(id) {
+  const a = cfg.accounts.find(x => String(x.id) === String(id));
+  if (!a) return;
+  a.active = !a.active;
+  await api('PATCH', `/api/config/account/${id}`, { active: a.active });
+  render();
+}
+
+async function removeAcct(id) {
+  if (!confirm('Отключить аккаунт?')) return;
+  cfg.accounts = cfg.accounts.filter(a => String(a.id) !== String(id));
+  await api('DELETE', `/api/config/account/${id}`);
+  render();
+}
+
+async function updateAcctLink(id, link) {
+  const a = cfg.accounts.find(x => String(x.id) === String(id));
+  if (a) a.link = link;
+  await api('PATCH', `/api/config/account/${id}`, { link });
+}
+
+async function refreshToken(id) {
+  const r = await api('POST', `/api/config/account/${id}/refresh`);
+  if (r?.ok) { toast('Токен обновлён до ' + r.expiry, 'green'); loadConfig(); }
+  else toast('Ошибка обновления токена', 'red');
+}
+
+// ─── СЦЕНАРИИ ─────────────────────────────────────────────────────────────────
+function toggleSc(id) { openScenarios.has(id) ? openScenarios.delete(id) : openScenarios.add(id); renderScenarios(); }
+function updateSc(id, f, v) { const s = cfg.scenarios.find(x=>x.id===id); if(s) s[f]=v; }
+function updateScAccts(id, sel) { const s = cfg.scenarios.find(x=>x.id===id); if(s) s.accountIds=[...sel.selectedOptions].map(o=>o.value); }
+function toggleFollowUp(id) { const s = cfg.scenarios.find(x=>x.id===id); if(s){s.followUp=!s.followUp;renderScenarios();} }
+
+function addScenario() {
+  const newId = cfg.scenarios.length ? Math.max(...cfg.scenarios.map(s=>s.id))+1 : 1;
+  cfg.scenarios.push({ id:newId, name:'Новый сценарий', keywords:[], dmText:'', followUp:false, accountIds:[] });
+  openScenarios.add(newId);
+  renderScenarios();
+}
+
+function addKw(sid) {
+  const inp = document.getElementById('kw-inp-'+sid);
+  const val = inp.value.trim().toLowerCase();
+  if (!val) return;
+  const s = cfg.scenarios.find(x=>x.id===sid);
+  if (s && !s.keywords.includes(val)) { s.keywords.push(val); renderScenarios(); }
+  inp.value = '';
+}
+
+function removeKw(sid, kw) { const s=cfg.scenarios.find(x=>x.id===sid); if(s){s.keywords=s.keywords.filter(k=>k!==kw);renderScenarios();} }
+
+function removeSc(id) {
+  if (!confirm('Удалить сценарий?')) return;
+  cfg.scenarios = cfg.scenarios.filter(s=>s.id!==id);
+  openScenarios.delete(id);
+  renderScenarios();
+  saveScenarios();
+}
+
+async function saveScenarios() {
+  const r = await api('PATCH','/api/config/scenarios',{scenarios:cfg.scenarios});
+  if (r?.ok) toast('Сценарии сохранены','green');
+}
+
+// ─── ОТВЕТЫ ───────────────────────────────────────────────────────────────────
+function addReply() { const t=document.getElementById('new-reply-text').value.trim(); if(!t)return; cfg.commentReplies.push(t); document.getElementById('new-reply-text').value=''; renderReplies(); }
+function removeReply(i) { cfg.commentReplies.splice(i,1); renderReplies(); }
+function editReply(i) { const v=prompt('Редактировать:',cfg.commentReplies[i]); if(v!==null&&v.trim()){cfg.commentReplies[i]=v.trim();renderReplies();} }
+async function saveReplies() { const r=await api('PATCH','/api/config/replies',{replies:cfg.commentReplies}); if(r?.ok) toast('Ответы сохранены','green'); }
+
+// ─── OAUTH ────────────────────────────────────────────────────────────────────
+function startOAuth() {
+  if (!cfg.appId) { toast('Сначала заполните настройки (ID приложения)', 'red'); go('settings'); return; }
+  showModal();
+
+  window.addEventListener('message', onOAuthMessage);
+  fetch('/auth/instagram').then(r=>r.json()).then(d => {
+    if (d.error) { toast(d.error, 'red'); closeModal(); return; }
+    const popup = window.open(d.url, 'meta_oauth', 'width=600,height=700,left=200,top=100');
+    if (!popup) { toast('Разрешите всплывающие окна для этого сайта','red'); closeModal(); }
+  });
+}
+
+function onOAuthMessage(e) {
+  if (!e.data || !e.data.type) return;
+  window.removeEventListener('message', onOAuthMessage);
+  closeModal();
+
+  if (e.data.type === 'oauth_success') {
+    toast('Аккаунт подключён!', 'green');
+    loadConfig();
+    go('accounts');
+  } else if (e.data.type === 'oauth_error') {
+    toast('Ошибка: ' + e.data.message, 'red');
+  }
+}
+
+function showModal() {
+  document.getElementById('modal-content').innerHTML = `
+    <div class="modal-title">Подключение через Meta</div>
+    <div class="modal-sub">Откроется окно авторизации Facebook</div>
+    <div style="margin-bottom:18px">
+      <div class="step-row"><span class="step-num active">1</span><div class="step-text">Войти в Facebook и разрешить доступ</div></div>
+      <div class="step-row"><span class="step-num">2</span><div class="step-text">Выбрать страницу с Instagram-аккаунтом</div></div>
+      <div class="step-row"><span class="step-num">3</span><div class="step-text">Агент получает токен и активирует webhook</div></div>
+    </div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:8px">Запрашиваемые разрешения</div>
+    <div class="perm-row">
+      <span class="perm">instagram_manage_comments</span>
+      <span class="perm">instagram_manage_messages</span>
+      <span class="perm">pages_messaging</span>
+      <span class="perm">pages_read_engagement</span>
+    </div>
+    <div style="color:var(--text3);font-size:13px;text-align:center;padding:16px 0"><i class="ti ti-loader" style="font-size:20px;display:block;margin-bottom:8px"></i>Ожидаем авторизацию...</div>
+    <div class="row-end"><button class="btn sm" onclick="closeModal()">Отмена</button></div>
+  `;
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function closeModal() { document.getElementById('modal-overlay').style.display = 'none'; }
+
+// ─── TOAST ────────────────────────────────────────────────────────────────────
+let toastT;
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.className='', 3200);
+}
+
+// ─── AI ПОМОЩНИК ──────────────────────────────────────────────────────────────
+const aiHistory = [];
+let aiThinking = false;
+
+const QUICK_PROMPTS = {
+  scenarios: () => {
+    const accts = cfg.accounts.map(a => a.username || a.displayName).join(', ') || 'не указаны';
+    return `У меня Instagram-агент для аккаунтов: ${accts}. Уже есть сценарии: ${cfg.scenarios.map(s=>s.name).join(', ') || 'пока нет'}. Придумай 3–4 новых сценария автоответов. Для каждого дай: название, список из 5–7 ключевых слов, и текст первого DM (2–3 предложения, живым языком без клише). Выдай в виде пронумерованного списка.`;
+  },
+  keywords: () => {
+    const scenes = cfg.scenarios.map(s => s.name).join(', ') || 'пока нет';
+    return `Мои сценарии: ${scenes}. Для каждого сценария подбери 8–10 ключевых слов и фраз, которые пишут в комментариях люди заинтересованные в покупке или услуге. Включи разные варианты написания, с ошибками и сокращениями как пишут реальные люди. Сгруппируй по сценариям.`;
+  },
+  replies: () => `Напиши 8 вариантов ответа на комментарий в Instagram. Требования: короткие (1 предложение), живой разговорный тон, не одинаковые начала, без восклицательных знаков в конце каждой, смысл — "написали вам в директ". Выдай просто список, по одной фразе на строку.`,
+  dm: () => {
+    const scenes = cfg.scenarios.map(s => `"${s.name}"`).join(', ') || 'общий';
+    return `Напиши первое DM сообщение для сценариев: ${scenes}. Требования: 2–3 предложения, обращение по имени (используй {{name}}), живой тон без спама и клише, заканчивается на вопрос или призыв к действию. Для каждого сценария отдельный вариант.`;
+  },
+  followup: () => `Напиши follow-up DM сообщение — отправляется через 1 час после первого если человек ещё не подписался. Требования: краткое (1–2 предложения), не навязчивое, напоминает что есть ссылка/материалы, обращение по имени {{name}}. Дай 3 варианта.`,
+  audit: () => {
+    const summary = {
+      accounts: cfg.accounts.map(a => a.username || a.displayName),
+      scenarios: cfg.scenarios.map(s => ({ name: s.name, keywords: s.keywords, dmText: s.dmText?.slice(0,80) })),
+      replies: cfg.commentReplies,
+    };
+    return `Вот текущие настройки моего Instagram-агента:\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\nПроверь и дай конкретные рекомендации: что улучшить в ключевых словах, текстах DM и ответах на комментарии. Что может выглядеть как бот?`;
+  },
+};
+
+function renderAiContext() {
+  const el = document.getElementById('ai-context-list');
+  if (!el) return;
+  const rows = [
+    { label: 'Аккаунтов', val: cfg.accounts.filter(a=>a.active).length + ' активных' },
+    { label: 'Сценариев', val: cfg.scenarios.length },
+    { label: 'Ключ. слов', val: cfg.scenarios.reduce((n,s)=>n+(s.keywords||[]).length,0) },
+    { label: 'Ответов', val: cfg.commentReplies.length + ' вариантов' },
+  ];
+  el.innerHTML = rows.map(r =>
+    `<div class="ai-context-item"><span>${r.label}</span><span style="color:var(--text);font-weight:600">${r.val}</span></div>`
+  ).join('');
+}
+
+function aiQuick(type) {
+  const prompt = QUICK_PROMPTS[type]?.();
+  if (!prompt) return;
+  document.getElementById('ai-input').value = prompt;
+  aiSend();
+}
+
+function clearChat() {
+  aiHistory.length = 0;
+  document.getElementById('ai-messages').innerHTML = `
+    <div class="ai-msg bot">
+      <div class="ai-avatar"><i class="ti ti-sparkles"></i></div>
+      <div><div class="ai-bubble">Чат очищен. Чем помочь?</div></div>
+    </div>`;
+}
+
+// FIX: AI запросы идут через серверный прокси /api/ai, а не напрямую в Anthropic
+async function aiSend() {
+  if (aiThinking) return;
+  const input = document.getElementById('ai-input');
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  addUserMsg(text);
+  aiHistory.push({ role: 'user', content: text });
+
+  aiThinking = true;
+  document.getElementById('ai-send-btn').disabled = true;
+  const typingId = addTyping();
+
+  try {
+    const systemPrompt = `Ты — эксперт по Instagram-маркетингу и автоматизации. Помогаешь настроить AI-агента для Instagram бизнес-аккаунтов.
+
+Контекст текущего агента:
+- Аккаунты: ${cfg.accounts.map(a=>'@'+(a.username||a.displayName)).join(', ') || 'не подключены'}
+- Сценарии: ${cfg.scenarios.map(s=>s.name+' (слова: '+s.keywords?.join(',')+')').join(' | ') || 'не настроены'}
+- Текущих ответов на комментарии: ${cfg.commentReplies.length}
+
+Правила ответов:
+- Конкретно и кратко. Никаких общих фраз.
+- Тексты для Instagram пиши живым языком — как пишут реальные люди, без корпоративщины
+- Когда предлагаешь тексты — сразу давай готовые варианты, без объяснений зачем
+- Если предлагаешь что добавить в агента — говори прямо "добавь это в сценарий X"
+- Отвечай на русском`;
+
+    // FIX: используем серверный прокси вместо прямого вызова Anthropic API
+    const resp = await fetch('/api/ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages: aiHistory,
+      }),
+    });
+
+    const data = await resp.json();
+    removeTyping(typingId);
+
+    if (data.error) {
+      addBotMsg('Ошибка API: ' + (data.error.message || JSON.stringify(data.error)), null);
+      aiHistory.pop();
+    } else {
+      const reply = data.content?.find(b => b.type === 'text')?.text || '';
+      aiHistory.push({ role: 'assistant', content: reply });
+      addBotMsg(reply, detectActions(reply));
+    }
+  } catch (err) {
+    removeTyping(typingId);
+    addBotMsg('Ошибка соединения: ' + err.message, null);
+    aiHistory.pop();
+  }
+
+  aiThinking = false;
+  document.getElementById('ai-send-btn').disabled = false;
+}
+
+function detectActions(text) {
+  const actions = [];
+  if (/сценари|ключев|keyword/i.test(text)) {
+    actions.push({ label: '+ Создать сценарий из ответа', fn: 'aiCreateScenario' });
+  }
+  if (/ответ|комментар|директ|личк/i.test(text) && text.split('\n').length > 3) {
+    actions.push({ label: '+ Добавить в пул ответов', fn: 'aiAddReplies' });
+  }
+  if (/привет|dm|сообщени/i.test(text.toLowerCase()) && text.length > 100) {
+    actions.push({ label: '+ Использовать как DM', fn: 'aiUseDM' });
+  }
+  return actions.length ? actions : null;
+}
+
+function addUserMsg(text) {
+  const msgs = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+  div.className = 'ai-msg user';
+  div.innerHTML = `<div class="ai-avatar"><i class="ti ti-user"></i></div><div><div class="ai-bubble">${escHtml(text)}</div></div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addBotMsg(text, actions) {
+  const msgs = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+  div.className = 'ai-msg bot';
+  const actionsHtml = actions ? `<div class="ai-actions">${actions.map(a =>
+    `<button class="ai-action-btn" onclick="${a.fn}()">${a.label}</button>`
+  ).join('')}</div>` : '';
+  div.innerHTML = `<div class="ai-avatar"><i class="ti ti-sparkles"></i></div><div><div class="ai-bubble">${mdToHtml(text)}</div>${actionsHtml}</div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addTyping() {
+  const msgs = document.getElementById('ai-messages');
+  const id = 'typing-' + Date.now();
+  const div = document.createElement('div');
+  div.className = 'ai-msg bot';
+  div.id = id;
+  div.innerHTML = `<div class="ai-avatar"><i class="ti ti-sparkles"></i></div><div><div class="ai-typing"><span></span><span></span><span></span></div></div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return id;
+}
+
+function removeTyping(id) {
+  document.getElementById(id)?.remove();
+}
+
+function aiAddReplies() {
+  const last = aiHistory.filter(m=>m.role==='assistant').pop()?.content || '';
+  const lines = last.split('\n')
+    .map(l => l.replace(/^[\d\-\*\.\)]+\s*/,'').trim())
+    .filter(l => l.length > 8 && l.length < 160 && !/^[#*_]/.test(l));
+
+  if (!lines.length) { toast('Не найдено подходящих фраз','red'); return; }
+  lines.forEach(l => { if (!cfg.commentReplies.includes(l)) cfg.commentReplies.push(l); });
+  saveReplies();
+  renderReplies();
+  toast(`Добавлено ${lines.length} ответов в пул`, 'green');
+}
+
+function aiCreateScenario() {
+  addScenario();
+  go('scenarios');
+  toast('Создан новый сценарий — заполните поля на основе ответа AI', 'green');
+}
+
+function aiUseDM() {
+  const last = aiHistory.filter(m=>m.role==='assistant').pop()?.content || '';
+  const dm = last.split('\n\n')[0].replace(/^[*#\d\.\-]+\s*/,'').trim().slice(0, 400);
+  if (!cfg.scenarios.length) { toast('Сначала создайте сценарий','red'); go('scenarios'); return; }
+  cfg.scenarios[cfg.scenarios.length - 1].dmText = dm;
+  saveScenarios();
+  renderScenarios();
+  go('scenarios');
+  toast('DM добавлен в последний сценарий', 'green');
+}
+
+function escHtml(t) {
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+function mdToHtml(t) {
+  return t
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/```([\s\S]*?)```/g, (_,c) => `<pre>${c.trim()}</pre>`)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^(\d+\. .+)$/gm, '<li>$1</li>')
+    .replace(/^[\-\*] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>')
+    .replace(/\n{2,}/g, '<br><br>')
+    .replace(/\n/g, '<br>');
+}
+
+// Авторесайз textarea
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('ai-input');
+  if (inp) inp.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+  });
+});
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+loadConfig();
+loadLogs();
+setInterval(loadLogs, 15000);
+</script>
+</body>
+</html>
