@@ -1,8 +1,8 @@
 {
-  "appId": "864495216723927",
-  "appSecret": "ca20ff8b13357bee65b69ce853669fec",
-  "oauthRedirectUri": "https://ВАШ-ДОМЕН.com/auth/instagram/callback",
-  "verifyToken": "igagent2024",
+  "appId": "",
+  "appSecret": "",
+  "redirectUri": "",
+  "verifyToken": "",
   "accounts": [],
   "scenarios": [],
   "commentReplies": []
