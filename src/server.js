@@ -4,28 +4,58 @@ import session from 'express-session';
 import pgSession from 'connect-pg-simple';
 import helmet from 'helmet';
 import bcrypt from 'bcryptjs';
-import pg from 'pg';
 import { z } from 'zod';
-import { initDb, query, getSetting, setSetting } from './db.js';
+import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
 import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram } from './meta.js';
 import { processCommentEvent } from './automation.js';
 
 const app = express();
 const PgSession = pgSession(session);
-const pgPool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false });
 await initDb();
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
-  store: new PgSession({ pool: pgPool, createTableIfMissing: true }),
-  secret: process.env.SESSION_SECRET || 'dev-secret',
+  store: pool && databaseState.connected ? new PgSession({ pool, createTableIfMissing: true }) : undefined,
+  secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
   resave: false,
   saveUninitialized: false,
   cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 1000*60*60*24*7 }
 }));
 app.use(express.static('public'));
+
+app.get('/healthz', async (req, res) => {
+  if (!pool) {
+    return res.status(200).json({ ok: true, app: 'running', database: 'not_configured', message: databaseState.message });
+  }
+  try {
+    await query('SELECT 1');
+    res.json({ ok: true, app: 'running', database: 'connected' });
+  } catch (err) {
+    res.status(200).json({ ok: true, app: 'running', database: 'error', message: err.message });
+  }
+});
+
+app.get('/api/system', (req, res) => {
+  res.json({
+    app: 'running',
+    database: databaseState.connected ? 'connected' : (pool ? 'error' : 'not_configured'),
+    databaseMessage: databaseState.message,
+    node: process.version,
+    dryRun: process.env.DRY_RUN ?? 'true'
+  });
+});
+
+function requireDb(req, res, next) {
+  if (pool && databaseState.connected) return next();
+  return res.status(503).json({
+    error: 'Database is not connected',
+    message: databaseState.message,
+    fix: 'Deploy via render.yaml Blueprint or add DATABASE_URL from Render PostgreSQL Internal Database URL.'
+  });
+}
+
 
 function requireAuth(req,res,next){ if(req.session.user) return next(); res.status(401).json({error:'Unauthorized'}); }
 function mask(v){ if(!v) return ''; return v.length <= 6 ? '******' : `${v.slice(0,3)}***${v.slice(-3)}`; }
@@ -42,7 +72,7 @@ app.post('/api/login', async (req,res)=>{
 app.post('/api/logout', (req,res)=> req.session.destroy(()=>res.json({ok:true})));
 app.get('/api/me', (req,res)=> res.json({user:req.session.user||null}));
 
-app.get('/api/dashboard', requireAuth, async (req,res)=>{
+app.get('/api/dashboard', requireAuth, requireDb, async (req,res)=>{
   const [[accounts],[rules],[today],[sent],[errors]] = await Promise.all([
     query('SELECT COUNT(*)::int n FROM instagram_accounts'),
     query('SELECT COUNT(*)::int n FROM automation_rules WHERE enabled=TRUE'),
@@ -53,14 +83,14 @@ app.get('/api/dashboard', requireAuth, async (req,res)=>{
   res.json({accounts:accounts.rows[0].n,rules:rules.rows[0].n,today:today.rows[0].n,sent:sent.rows[0].n,errors:errors.rows[0].n});
 });
 
-app.get('/api/settings', requireAuth, async (req,res)=>{
+app.get('/api/settings', requireAuth, requireDb, async (req,res)=>{
   const keys = ['META_APP_ID','META_APP_SECRET','META_GRAPH_VERSION','META_WEBHOOK_VERIFY_TOKEN','APP_BASE_URL','DRY_RUN','DEFAULT_RATE_LIMIT_PER_MINUTE'];
   const data = {};
   for (const k of keys) data[k] = await getSetting(k, process.env[k] || '');
   data.META_APP_SECRET_MASKED = mask(data.META_APP_SECRET);
   res.json(data);
 });
-app.post('/api/settings', requireAuth, async (req,res)=>{
+app.post('/api/settings', requireAuth, requireDb, async (req,res)=>{
   const schema = z.object({
     META_APP_ID:z.string().optional(), META_APP_SECRET:z.string().optional(), META_GRAPH_VERSION:z.string().default('v23.0'),
     META_WEBHOOK_VERIFY_TOKEN:z.string().optional(), APP_BASE_URL:z.string().optional(), DRY_RUN:z.string().default('true'), DEFAULT_RATE_LIMIT_PER_MINUTE:z.string().default('15')
@@ -70,14 +100,14 @@ app.post('/api/settings', requireAuth, async (req,res)=>{
   res.json({ok:true});
 });
 
-app.get('/auth/meta/start', requireAuth, async (req,res)=>{
+app.get('/auth/meta/start', requireAuth, requireDb, async (req,res)=>{
   const cfg = await metaConfig();
   const redirect = `${cfg.baseUrl}/auth/meta/callback`;
   const scope = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
   const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
   res.redirect(url);
 });
-app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
+app.get('/auth/meta/callback', requireAuth, requireDb, async (req,res)=>{
   try {
     const cfg = await metaConfig();
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
@@ -96,19 +126,19 @@ app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
   }
 });
 
-app.get('/api/accounts', requireAuth, async (req,res)=>{
+app.get('/api/accounts', requireAuth, requireDb, async (req,res)=>{
   const { rows } = await query('SELECT id,ig_user_id,username,page_id,page_name,is_active,token_expires_at,created_at FROM instagram_accounts ORDER BY id DESC');
   res.json(rows);
 });
-app.post('/api/accounts/:id/toggle', requireAuth, async (req,res)=>{
+app.post('/api/accounts/:id/toggle', requireAuth, requireDb, async (req,res)=>{
   await query('UPDATE instagram_accounts SET is_active=NOT is_active, updated_at=NOW() WHERE id=$1',[req.params.id]); res.json({ok:true});
 });
 
-app.get('/api/rules', requireAuth, async (req,res)=>{
+app.get('/api/rules', requireAuth, requireDb, async (req,res)=>{
   const { rows } = await query(`SELECT r.*, a.username account_username FROM automation_rules r JOIN instagram_accounts a ON a.id=r.account_id ORDER BY r.id DESC`);
   res.json(rows);
 });
-app.post('/api/rules', requireAuth, async (req,res)=>{
+app.post('/api/rules', requireAuth, requireDb, async (req,res)=>{
   const s = z.object({ id:z.number().optional(), account_id:z.coerce.number(), name:z.string().min(1), keywords:z.array(z.string()).default([]), match_mode:z.string().default('contains'), public_replies:z.array(z.string()).default([]), dm_message:z.string().default(''), target_url:z.string().optional(), use_private_reply:z.boolean().default(true), use_public_reply:z.boolean().default(true), enabled:z.boolean().default(true), rate_limit_per_minute:z.coerce.number().default(15) });
   const r = s.parse(req.body);
   if (r.id) {
@@ -120,15 +150,15 @@ app.post('/api/rules', requireAuth, async (req,res)=>{
   }
   res.json({ok:true});
 });
-app.delete('/api/rules/:id', requireAuth, async (req,res)=>{ await query('DELETE FROM automation_rules WHERE id=$1',[req.params.id]); res.json({ok:true}); });
+app.delete('/api/rules/:id', requireAuth, requireDb, async (req,res)=>{ await query('DELETE FROM automation_rules WHERE id=$1',[req.params.id]); res.json({ok:true}); });
 
-app.get('/api/logs', requireAuth, async (req,res)=>{
+app.get('/api/logs', requireAuth, requireDb, async (req,res)=>{
   const { rows } = await query(`SELECT l.*, a.username account_username, r.name rule_name FROM automation_logs l LEFT JOIN instagram_accounts a ON a.id=l.account_id LEFT JOIN automation_rules r ON r.id=l.rule_id ORDER BY l.id DESC LIMIT 200`);
   res.json(rows);
 });
 
 app.get('/webhook/meta', async (req,res)=>{
-  const token = await getSetting('META_WEBHOOK_VERIFY_TOKEN');
+  const token = await getSetting('META_WEBHOOK_VERIFY_TOKEN', process.env.META_WEBHOOK_VERIFY_TOKEN || '');
   if(req.query['hub.mode']==='subscribe' && req.query['hub.verify_token']===token) return res.send(req.query['hub.challenge']);
   res.sendStatus(403);
 });
@@ -140,13 +170,13 @@ app.post('/webhook/meta', async (req,res)=>{
         if (['comments','mentions'].includes(change.field) || change.value?.text) await processCommentEvent(change);
       }
       for (const msg of entry.messaging || []) {
-        await query(`INSERT INTO automation_logs(event_type,status,raw_event) VALUES('message','received',$1)`, [msg]);
+        if (hasDatabase()) await query(`INSERT INTO automation_logs(event_type,status,raw_event) VALUES('message','received',$1)`, [msg]);
       }
     }
   } catch(e) { console.error('Webhook processing error', e); }
 });
 
-app.post('/api/test-webhook', requireAuth, async (req,res)=>{
+app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
   const event = { field:'comments', value:{ id:`test_${Date.now()}`, text:req.body.text || 'ремонт', from:{username:'test_user'} } };
   const out = await processCommentEvent(event); res.json(out);
 });

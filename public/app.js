@@ -1,13 +1,14 @@
 const $ = id => document.getElementById(id);
 const api = async (url, opts={}) => {
   const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
-  if(!r.ok) throw new Error((await r.json().catch(()=>({error:r.statusText}))).error || r.statusText);
+  if(!r.ok){ const e=await r.json().catch(()=>({error:r.statusText})); throw new Error(e.message || e.error || r.statusText); }
   return r.json();
 };
 function lines(v){return (v||'').split('\n').map(s=>s.trim()).filter(Boolean)}
 function showTab(name){document.querySelectorAll('.tab').forEach(x=>x.classList.add('hidden')); $(name).classList.remove('hidden'); document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.tab===name)); loadAll();}
 document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>showTab(n.dataset.tab));
-async function boot(){ const me=await api('/api/me'); $('login').classList.toggle('hidden',!!me.user); $('app').classList.toggle('hidden',!me.user); if(me.user) loadAll();}
+async function boot(){ const me=await api('/api/me'); $('login').classList.toggle('hidden',!!me.user); $('app').classList.toggle('hidden',!me.user); if(me.user){ await loadSystem(); loadAll(); }}
+async function loadSystem(){ try{ const s=await api('/api/system'); const b=$('systemBanner'); if(s.database!=='connected'){ b.classList.remove('hidden'); b.innerHTML=`<b>База данных: ${s.database}</b><br>${s.databaseMessage||''}<br><small>Для полного режима добавь DATABASE_URL от Render PostgreSQL или сделай деплой через Blueprint.</small>`; } else { b.classList.add('hidden'); }}catch(e){} }
 async function login(){try{await api('/api/login',{method:'POST',body:JSON.stringify({username:$('loginUser').value,password:$('loginPass').value})}); boot();}catch(e){$('loginErr').textContent=e.message}}
 async function logout(){await api('/api/logout',{method:'POST'}); location.reload()}
 async function loadAll(){ await Promise.allSettled([loadDashboard(),loadAccounts(),loadRules(),loadLogs(),loadSettings()]); }

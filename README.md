@@ -1,30 +1,85 @@
-# Instagram AI Agent Pro — MVP для Render
+# Instagram AI Agent Pro — Render-ready MVP
 
 Рабочий MVP для 3–5 Instagram Professional аккаунтов: Meta OAuth, аккаунты, правила по ключевым словам, случайные публичные ответы, private replies/DM, логи, лимиты и DRY_RUN.
 
-## Что внутри
+## Самый правильный деплой на Render
 
-- Express + PostgreSQL
-- Render-ready `render.yaml`
-- Web UI без сборки frontend
-- Meta OAuth для подключения страниц и Instagram Business/Creator аккаунтов
-- Meta Webhook endpoint
-- Правила: ключевые слова, варианты ответов, DM-шаблон, ссылка, лимиты
-- Отдельная вкладка **Секреты / Настройки**
-
-## Деплой на Render
-
-1. Создай новый GitHub repo и залей эти файлы.
-2. В Render нажми **New → Blueprint** и выбери repo с `render.yaml`.
-3. Render создаст Web Service и PostgreSQL.
-4. После деплоя открой URL сервиса.
-5. Войди в панель: `ADMIN_USERNAME` и `ADMIN_PASSWORD` из Render env.
-6. Открой вкладку **Секреты** и добавь:
-   - `META_APP_ID`
-   - `META_APP_SECRET`
+1. Создай новый GitHub репозиторий и загрузи туда файлы из архива.
+2. В Render нажми **New → Blueprint**.
+3. Выбери репозиторий.
+4. Render прочитает `render.yaml` и сам создаст:
+   - Web Service `ig-agent-pro`
+   - PostgreSQL `ig-agent-db`
+   - переменную `DATABASE_URL`
+   - `SESSION_SECRET`
+   - `ADMIN_PASSWORD`
    - `META_WEBHOOK_VERIFY_TOKEN`
-   - `APP_BASE_URL=https://your-service.onrender.com`
-   - `DRY_RUN=true` для тестов, потом `false`.
+5. После деплоя открой `/healthz`.
+
+Нормальный ответ:
+
+```json
+{"ok":true,"app":"running","database":"connected"}
+```
+
+## Если делаешь Web Service вручную
+
+Обязательно создай PostgreSQL в Render и добавь в Web Service → Environment:
+
+```env
+DATABASE_URL=Internal Database URL из Render PostgreSQL
+PGSSLMODE=require
+NODE_ENV=production
+PORT=10000
+SESSION_SECRET=любая-длинная-строка
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=твой-пароль
+DRY_RUN=true
+META_GRAPH_VERSION=v23.0
+META_WEBHOOK_VERIFY_TOKEN=любой-токен-для-webhook
+```
+
+Build Command:
+
+```bash
+npm install
+```
+
+Start Command:
+
+```bash
+npm start
+```
+
+## Почему раньше была ошибка ECONNREFUSED 127.0.0.1:5432
+
+Это происходило потому, что сервис запускался без `DATABASE_URL`, и драйвер PostgreSQL пытался найти базу на localhost. В этой версии:
+
+- приложение больше не падает при отсутствии `DATABASE_URL`;
+- `/healthz` показывает статус базы;
+- UI показывает баннер с причиной;
+- `render.yaml` создаёт базу автоматически при Blueprint-деплое.
+
+## Первый вход
+
+Логин и пароль смотри в Render → Web Service → Environment:
+
+```text
+ADMIN_USERNAME
+ADMIN_PASSWORD
+```
+
+## Вкладка «Секреты / Настройки»
+
+После входа добавь:
+
+- `META_APP_ID`
+- `META_APP_SECRET`
+- `META_WEBHOOK_VERIFY_TOKEN`
+- `APP_BASE_URL=https://your-service.onrender.com`
+- `DRY_RUN=true` для тестов, потом `false`
+
+Секреты также можно хранить напрямую в Render Environment Variables.
 
 ## Meta настройки
 
@@ -49,23 +104,17 @@ https://your-service.onrender.com/webhook/meta
 
 Webhook verify token должен совпадать с `META_WEBHOOK_VERIFY_TOKEN`.
 
-## Важно про DRY_RUN
+## Что умеет MVP
 
-Пока `DRY_RUN=true`, система не отправляет реальные запросы в Meta для reply/private reply. Это безопасный режим для проверки правил и логов.
-
-Когда всё настроено, поставь `DRY_RUN=false`.
+- подключать Instagram аккаунты через Meta OAuth;
+- хранить 3–5 рабочих аккаунтов;
+- создавать правила по ключевым словам;
+- добавлять разные варианты публичного ответа;
+- отправлять private reply/DM-шаблон;
+- включать DRY_RUN;
+- смотреть логи;
+- ограничивать частоту отправок.
 
 ## Ограничения v1
 
-- Проверка подписки не включена: официальный API не всегда позволяет надёжно проверить любого пользователя на подписку.
-- Для публичного продакшена потребуется App Review Meta и Live Mode.
-- Private reply обычно работает в рамках сценария комментария и политик Instagram Messaging.
-
-## Лучшие практики, уже заложенные
-
-- Несколько вариантов публичного ответа, чтобы не выглядеть как спам.
-- Лимит отправок на аккаунт в минуту.
-- DRY_RUN перед реальным запуском.
-- Логи всех событий и ошибок Meta.
-- Секреты вынесены из кода.
-- Один сервис для Render, без лишней микросервисной сложности.
+Проверка «подписан пользователь или нет» не включена, потому что официальный Instagram Graph API не всегда даёт надёжный способ проверить любого пользователя на подписку. Эту функцию лучше добавлять после проверки доступных permissions и App Review.
