@@ -2,10 +2,12 @@ import axios from 'axios';
 import { getSetting } from './db.js';
 
 export async function metaConfig() {
+  const graphVersionRaw = await getSetting('META_GRAPH_VERSION', 'v23.0');
+  const graphVersion = String(graphVersionRaw || 'v23.0').trim() || 'v23.0';
   return {
     appId: await getSetting('META_APP_ID'),
     appSecret: await getSetting('META_APP_SECRET'),
-    graphVersion: await getSetting('META_GRAPH_VERSION', 'v23.0'),
+    graphVersion,
     baseUrl: await getSetting('APP_BASE_URL'),
     verifyToken: await getSetting('META_WEBHOOK_VERIFY_TOKEN'),
     dryRun: String(await getSetting('DRY_RUN', 'true')) === 'true'

@@ -82,9 +82,13 @@ export async function initDb() {
 }
 
 export async function getSetting(key, fallback = '') {
-  if (!pool || !databaseState.connected) return process.env[key] ?? fallback;
+  const envValue = process.env[key];
+  if (!pool || !databaseState.connected) return (envValue && String(envValue).trim()) ? envValue : fallback;
   const { rows } = await query('SELECT value FROM settings WHERE key=$1', [key]);
-  return rows[0]?.value ?? process.env[key] ?? fallback;
+  const dbValue = rows[0]?.value;
+  if (dbValue !== undefined && dbValue !== null && String(dbValue).trim() !== '') return dbValue;
+  if (envValue !== undefined && envValue !== null && String(envValue).trim() !== '') return envValue;
+  return fallback;
 }
 
 export async function setSetting(key, value) {

@@ -69,7 +69,7 @@ async function validateMetaReady(req) {
   const missing = [];
   if (!cfg.appId) missing.push('META_APP_ID');
   if (!cfg.appSecret) missing.push('META_APP_SECRET');
-  if (!cfg.graphVersion) missing.push('META_GRAPH_VERSION');
+  // META_GRAPH_VERSION is optional. Default is v23.0.
   if (!cfg.baseUrl) missing.push('APP_BASE_URL');
   if (missing.length) return { ok:false, title:'Не заполнены Meta настройки', details:`Не хватает: ${missing.join(', ')}`, fixes:[
     'Открой вкладку «Секреты / Настройки» и заполни поля.',

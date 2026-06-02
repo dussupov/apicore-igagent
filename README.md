@@ -149,3 +149,15 @@ DRY_RUN=true
 ```
 
 После изменения Environment Variables сделай `Manual Deploy → Clear build cache & deploy`.
+
+## Исправление: META_GRAPH_VERSION
+
+`META_GRAPH_VERSION` теперь не обязательная переменная. Если она не задана или пустая, приложение автоматически использует `v23.0`.
+
+Для подключения Instagram обязательно нужны только:
+
+- `DATABASE_URL`
+- `META_APP_ID`
+- `META_APP_SECRET`
+
+`APP_BASE_URL` желательно задать явно, но если не задан, приложение попробует определить Render-домен автоматически.
