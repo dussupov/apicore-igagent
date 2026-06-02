@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import { z } from 'zod';
 import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
 import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram } from './meta.js';
-import { processCommentEvent } from './automation.js';
+import { processCommentEvent, debugMatchComment } from './automation.js';
 
 const app = express();
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -223,6 +223,9 @@ app.get('/api/rules', requireAuth, requireDb, async (req,res)=>{
 app.post('/api/rules', requireAuth, requireDb, async (req,res)=>{
   const s = z.object({ id:z.number().optional(), account_id:z.coerce.number(), name:z.string().min(1), keywords:z.array(z.string()).default([]), match_mode:z.string().default('contains'), public_replies:z.array(z.string()).default([]), dm_message:z.string().default(''), target_url:z.string().optional(), use_private_reply:z.boolean().default(true), use_public_reply:z.boolean().default(true), enabled:z.boolean().default(true), rate_limit_per_minute:z.coerce.number().default(15) });
   const r = s.parse(req.body);
+  const splitList = (arr) => (arr || []).flatMap(x => String(x).split(/[\n,;]+/)).map(x => x.trim()).filter(Boolean);
+  r.keywords = splitList(r.keywords);
+  r.public_replies = splitList(r.public_replies);
   if (r.id) {
     await query(`UPDATE automation_rules SET account_id=$1,name=$2,keywords=$3,match_mode=$4,public_replies=$5,dm_message=$6,target_url=$7,use_private_reply=$8,use_public_reply=$9,enabled=$10,rate_limit_per_minute=$11,updated_at=NOW() WHERE id=$12`,
       [r.account_id,r.name,r.keywords,r.match_mode,r.public_replies,r.dm_message,r.target_url||'',r.use_private_reply,r.use_public_reply,r.enabled,r.rate_limit_per_minute,r.id]);
@@ -249,7 +252,7 @@ app.post('/webhook/meta', async (req,res)=>{
   try {
     for (const entry of req.body.entry || []) {
       for (const change of entry.changes || []) {
-        if (['comments','mentions'].includes(change.field) || change.value?.text) await processCommentEvent(change);
+        if (['comments','mentions'].includes(change.field) || change.value?.text) await processCommentEvent({...change, entry_id: entry.id});
       }
       for (const msg of entry.messaging || []) {
         if (hasDatabase()) await query(`INSERT INTO automation_logs(event_type,status,raw_event) VALUES('message','received',$1)`, [msg]);
@@ -262,6 +265,10 @@ app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
   const event = { field:'comments', value:{ id:`test_${Date.now()}`, text:req.body.text || 'ремонт', from:{username:'test_user'} } };
   const out = await processCommentEvent(event); res.json(out);
 });
+
+app.get('/api/debug/match', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  res.json(await debugMatchComment(req.query.text || 'ремонт'));
+}));
 
 app.use((err, req, res, next) => {
   console.error('[REQUEST_ERROR]', req.method, req.originalUrl, err?.stack || err);

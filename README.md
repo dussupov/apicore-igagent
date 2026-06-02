@@ -161,3 +161,11 @@ DRY_RUN=true
 - `META_APP_SECRET`
 
 `APP_BASE_URL` желательно задать явно, но если не задан, приложение попробует определить Render-домен автоматически.
+
+## Debug matching
+
+Если webhook приходит, но статус `ignored`, открой:
+
+`/api/debug/match?text=ремонт`
+
+Теперь в логах `ignored` сохраняется причина: `no_enabled_rules`, `keyword_not_matched`, `no_active_instagram_accounts`, `empty_comment_text`.
