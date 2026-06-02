@@ -7,10 +7,10 @@ const api = async (url, opts={}) => {
 function lines(v){return (v||'').split('\n').map(s=>s.trim()).filter(Boolean)}
 function showTab(name){document.querySelectorAll('.tab').forEach(x=>x.classList.add('hidden')); $(name).classList.remove('hidden'); document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.tab===name)); loadAll();}
 document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>showTab(n.dataset.tab));
-async function boot(){ const me=await api('/api/me'); $('login').classList.toggle('hidden',!!me.user); $('app').classList.toggle('hidden',!me.user); if(me.user){ await loadSystem(); loadAll(); }}
+async function boot(){ $('app').classList.remove('hidden'); const login=$('login'); if(login) login.remove(); await loadSystem(); loadAll(); }
 async function loadSystem(){ try{ const s=await api('/api/system'); const b=$('systemBanner'); if(s.database!=='connected'){ b.classList.remove('hidden'); b.innerHTML=`<b>База данных: ${s.database}</b><br>${s.databaseMessage||''}<br><small>Для полного режима добавь DATABASE_URL от Render PostgreSQL или сделай деплой через Blueprint.</small>`; } else { b.classList.add('hidden'); }}catch(e){} }
-async function login(){try{await api('/api/login',{method:'POST',body:JSON.stringify({username:$('loginUser').value,password:$('loginPass').value})}); boot();}catch(e){$('loginErr').textContent=e.message}}
-async function logout(){await api('/api/logout',{method:'POST'}); location.reload()}
+async function login(){ await boot(); }
+async function logout(){ location.reload(); }
 async function loadAll(){ await Promise.allSettled([loadDashboard(),loadAccounts(),loadRules(),loadLogs(),loadSettings()]); }
 async function loadDashboard(){const s=await api('/api/dashboard'); ['Accounts','Rules','Today','Sent','Errors'].forEach(k=>$('s'+k).textContent=s[k.toLowerCase()]);}
 async function loadAccounts(){const a=await api('/api/accounts'); $('ruleAccount').innerHTML=a.map(x=>`<option value="${x.id}">@${x.username}</option>`).join(''); $('accountsList').innerHTML=a.map(x=>`<div class="item"><h2>@${x.username}</h2><p>${x.page_name||''} ${x.page_id?`<span class="pill">Page ${x.page_id}</span>`:''}</p><p>Статус: <b class="${x.is_active?'ok':'err'}">${x.is_active?'Активен':'Выключен'}</b></p><p>Token до: ${x.token_expires_at||'неизвестно'}</p><button onclick="toggleAccount(${x.id})">${x.is_active?'Выключить':'Включить'}</button></div>`).join('') || '<div class="card">Аккаунтов пока нет. Нажми “Подключить Instagram”.</div>';}

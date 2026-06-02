@@ -1,28 +1,17 @@
 import 'dotenv/config';
 import express from 'express';
-import session from 'express-session';
-import pgSession from 'connect-pg-simple';
 import helmet from 'helmet';
-import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
 import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram } from './meta.js';
 import { processCommentEvent } from './automation.js';
 
 const app = express();
-const PgSession = pgSession(session);
 await initDb();
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(session({
-  store: pool && databaseState.connected ? new PgSession({ pool, createTableIfMissing: true }) : undefined,
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 1000*60*60*24*7 }
-}));
 app.use(express.static('public'));
 
 app.get('/healthz', async (req, res) => {
@@ -57,20 +46,14 @@ function requireDb(req, res, next) {
 }
 
 
-function requireAuth(req,res,next){ if(req.session.user) return next(); res.status(401).json({error:'Unauthorized'}); }
+function requireAuth(req,res,next){ return next(); }
 function mask(v){ if(!v) return ''; return v.length <= 6 ? '******' : `${v.slice(0,3)}***${v.slice(-3)}`; }
 
-app.post('/api/login', async (req,res)=>{
-  const { username, password } = req.body;
-  const admin = process.env.ADMIN_USERNAME || 'admin';
-  const pass = process.env.ADMIN_PASSWORD || 'admin';
-  const ok = username === admin && (password === pass || bcrypt.compareSync(password, pass));
-  if(!ok) return res.status(401).json({error:'Wrong login'});
-  req.session.user = { username };
-  res.json({ok:true});
-});
-app.post('/api/logout', (req,res)=> req.session.destroy(()=>res.json({ok:true})));
-app.get('/api/me', (req,res)=> res.json({user:req.session.user||null}));
+// Internal platform authorization is intentionally disabled for single-owner MVP.
+// The dashboard opens immediately. Meta OAuth is still used only to connect Instagram accounts.
+app.post('/api/login', async (req,res)=> res.json({ok:true, authDisabled:true}));
+app.post('/api/logout', (req,res)=> res.json({ok:true, authDisabled:true}));
+app.get('/api/me', (req,res)=> res.json({user:{username:'owner', authDisabled:true}}));
 
 app.get('/api/dashboard', requireAuth, requireDb, async (req,res)=>{
   const [[accounts],[rules],[today],[sent],[errors]] = await Promise.all([
