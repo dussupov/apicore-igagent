@@ -66,6 +66,11 @@ export async function replyToComment(commentId, message, token) {
   return graphPost(`/${commentId}/replies`, { message }, token);
 }
 
-export async function privateReply(commentId, message, token) {
-  return graphPost(`/${commentId}/private_replies`, { message }, token);
+export async function privateReply(pageId, commentId, message, token) {
+  // Instagram Private Replies are sent through the connected Facebook Page messages edge.
+  // Recipient must be the real Instagram comment id received from the comments webhook.
+  return graphPost(`/${pageId}/messages`, {
+    recipient: { comment_id: String(commentId) },
+    message: { text: String(message || '') }
+  }, token);
 }

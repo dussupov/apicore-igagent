@@ -72,9 +72,10 @@ async function logIgnored(reason, event, data = {}) {
   return { matched: false, status: 'ignored', reason, ...data };
 }
 
-export async function processCommentEvent(changeOrEvent) {
+export async function processCommentEvent(changeOrEvent, options = {}) {
   const e = extractEvent(changeOrEvent);
   const { commentId, mediaId, text, from } = e;
+  const simulate = Boolean(options.simulate);
 
   if (!text || !normalize(text)) {
     return logIgnored('empty_comment_text', changeOrEvent);
@@ -116,15 +117,24 @@ export async function processCommentEvent(changeOrEvent) {
   const ok = await rateLimitOk(selected.account_id, selected.rate_limit_per_minute || Number(await getSetting('DEFAULT_RATE_LIMIT_PER_MINUTE', '15')));
   const publicReply = pickRandom(selected.public_replies || []);
   const dmText = [selected.dm_message, selected.target_url].filter(Boolean).join('\n\n');
-  let status = 'matched';
+  let status = simulate ? 'simulation_ok' : 'matched';
   let error = null;
+  const apiResponses = {};
 
   try {
     if (!ok) throw new Error('Rate limit exceeded for this account/minute');
     if (!commentId) throw new Error('No comment id in webhook event');
-    if (selected.use_public_reply && publicReply) await replyToComment(commentId, publicReply, account.access_token || selected.access_token);
-    if (selected.use_private_reply && dmText) await privateReply(commentId, dmText, account.access_token || selected.access_token);
-    status = 'sent';
+    if (!account.page_id && selected.use_private_reply) throw new Error('No Facebook page_id saved for this Instagram account. Reconnect Instagram via Meta OAuth.');
+
+    if (!simulate) {
+      if (selected.use_public_reply && publicReply) {
+        apiResponses.publicReply = await replyToComment(commentId, publicReply, account.access_token || selected.access_token);
+      }
+      if (selected.use_private_reply && dmText) {
+        apiResponses.privateReply = await privateReply(account.page_id, commentId, dmText, account.access_token || selected.access_token);
+      }
+      status = 'sent';
+    }
   } catch (err) {
     status = 'error';
     error = err?.response?.data ? JSON.stringify(err.response.data) : (err.message || String(err));
@@ -133,9 +143,9 @@ export async function processCommentEvent(changeOrEvent) {
   await query(
     `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,ig_username,media_id,comment_id,comment_text,selected_public_reply,dm_text,status,error,raw_event)
      VALUES($1,$2,'comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, event: changeOrEvent }]
+    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, event: changeOrEvent }]
   );
-  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, error };
+  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses }; 
 }
 
 export async function debugMatchComment(text = 'ремонт') {

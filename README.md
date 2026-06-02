@@ -1,171 +1,67 @@
-# Instagram AI Agent Pro — Render-ready MVP
+# IG Agent Pro — рабочая версия для Instagram
 
-Рабочий MVP для 3–5 Instagram Professional аккаунтов: Meta OAuth, аккаунты, правила по ключевым словам, случайные публичные ответы, private replies/DM, логи, лимиты и DRY_RUN.
+Эта версия убирает внутреннюю авторизацию и использует Meta OAuth только для подключения Instagram Professional аккаунтов.
 
-## Самый правильный деплой на Render
+## Что исправлено
 
-1. Создай новый GitHub репозиторий и загрузи туда файлы из архива.
-2. В Render нажми **New → Blueprint**.
-3. Выбери репозиторий.
-4. Render прочитает `render.yaml` и сам создаст:
-   - Web Service `ig-agent-pro`
-   - PostgreSQL `ig-agent-db`
-   - переменную `DATABASE_URL`
-   - `SESSION_SECRET`
-   - `ADMIN_PASSWORD`
-   - `META_WEBHOOK_VERIFY_TOKEN`
-5. После деплоя открой `/healthz`.
+- `/api/test-webhook` теперь работает только как симуляция и не вызывает Meta API с fake comment id.
+- Реальный webhook `/webhook/meta` отвечает только на настоящие Instagram comment id.
+- Private Reply отправляется через официальный Page messages endpoint: `/{PAGE_ID}/messages` с `recipient.comment_id`.
+- Public reply отправляется через `/{COMMENT_ID}/replies`.
+- В OAuth scope добавлен `pages_messaging`, нужный для private replies.
+- В логах сохраняются `apiResponses`, `commentId`, `pageId`, причина ошибок и выбранные тексты.
 
-Нормальный ответ:
+## Важное
 
-```json
-{"ok":true,"app":"running","database":"connected"}
-```
+После деплоя нужно заново нажать «Подключить Instagram», потому что OAuth теперь запрашивает дополнительное разрешение `pages_messaging`.
 
-## Если делаешь Web Service вручную
+## Render переменные
 
-Обязательно создай PostgreSQL в Render и добавь в Web Service → Environment:
+Обязательные:
 
 ```env
-DATABASE_URL=Internal Database URL из Render PostgreSQL
-PGSSLMODE=require
-NODE_ENV=production
-PORT=10000
-SESSION_SECRET=любая-длинная-строка
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=твой-пароль
-DRY_RUN=true
-META_GRAPH_VERSION=v23.0
-META_WEBHOOK_VERIFY_TOKEN=любой-токен-для-webhook
+DATABASE_URL=...
+META_APP_ID=...
+META_APP_SECRET=...
 ```
 
-Build Command:
-
-```bash
-npm install
-```
-
-Start Command:
-
-```bash
-npm start
-```
-
-## Почему раньше была ошибка ECONNREFUSED 127.0.0.1:5432
-
-Это происходило потому, что сервис запускался без `DATABASE_URL`, и драйвер PostgreSQL пытался найти базу на localhost. В этой версии:
-
-- приложение больше не падает при отсутствии `DATABASE_URL`;
-- `/healthz` показывает статус базы;
-- UI показывает баннер с причиной;
-- `render.yaml` создаёт базу автоматически при Blueprint-деплое.
-
-## Первый вход
-
-Логин и пароль смотри в Render → Web Service → Environment:
-
-```text
-ADMIN_USERNAME
-ADMIN_PASSWORD
-```
-
-## Вкладка «Секреты / Настройки»
-
-После входа добавь:
-
-- `META_APP_ID`
-- `META_APP_SECRET`
-- `META_WEBHOOK_VERIFY_TOKEN`
-- `APP_BASE_URL=https://your-service.onrender.com`
-- `DRY_RUN=true` для тестов, потом `false`
-
-Секреты также можно хранить напрямую в Render Environment Variables.
-
-## Meta настройки
-
-В Meta App нужны продукты:
-
-- Facebook Login
-- Instagram Graph API
-- Webhooks
-- Instagram Messaging API
-
-OAuth redirect URI:
-
-```text
-https://your-service.onrender.com/auth/meta/callback
-```
-
-Webhook callback URL:
-
-```text
-https://your-service.onrender.com/webhook/meta
-```
-
-Webhook verify token должен совпадать с `META_WEBHOOK_VERIFY_TOKEN`.
-
-## Что умеет MVP
-
-- подключать Instagram аккаунты через Meta OAuth;
-- хранить 3–5 рабочих аккаунтов;
-- создавать правила по ключевым словам;
-- добавлять разные варианты публичного ответа;
-- отправлять private reply/DM-шаблон;
-- включать DRY_RUN;
-- смотреть логи;
-- ограничивать частоту отправок.
-
-## Ограничения v1
-
-Проверка «подписан пользователь или нет» не включена, потому что официальный Instagram Graph API не всегда даёт надёжный способ проверить любого пользователя на подписку. Эту функцию лучше добавлять после проверки доступных permissions и App Review.
-
-
-## Если при подключении Instagram появляется 503
-
-В этой версии OAuth больше не должен ронять сервис. Открой:
-
-```
-https://YOUR-RENDER-DOMAIN/healthz
-https://YOUR-RENDER-DOMAIN/api/meta/debug
-```
-
-Проверь:
-
-- `database` должен быть `connected`;
-- `hasAppId` должен быть `true`;
-- `hasAppSecret` должен быть `true`;
-- `callbackUrl` нужно добавить в Meta App → Facebook Login → Valid OAuth Redirect URIs.
-
-Для Render укажи переменные окружения:
+Необязательные:
 
 ```env
-DATABASE_URL=Internal Database URL from Render PostgreSQL
-APP_BASE_URL=https://YOUR-RENDER-DOMAIN.onrender.com
-META_APP_ID=your_app_id
-META_APP_SECRET=your_app_secret
 META_GRAPH_VERSION=v23.0
-META_WEBHOOK_VERIFY_TOKEN=any_random_token
-DRY_RUN=true
+META_WEBHOOK_VERIFY_TOKEN=любая_строка_для_проверки_webhook
+APP_BASE_URL=https://apicore-igagent.onrender.com
+DRY_RUN=false
+DEFAULT_RATE_LIMIT_PER_MINUTE=15
 ```
 
-После изменения Environment Variables сделай `Manual Deploy → Clear build cache & deploy`.
+## Meta Webhook
 
-## Исправление: META_GRAPH_VERSION
+Callback URL:
 
-`META_GRAPH_VERSION` теперь не обязательная переменная. Если она не задана или пустая, приложение автоматически использует `v23.0`.
+```text
+https://apicore-igagent.onrender.com/webhook/meta
+```
 
-Для подключения Instagram обязательно нужны только:
+Verify Token должен совпадать с `META_WEBHOOK_VERIFY_TOKEN`.
 
-- `DATABASE_URL`
-- `META_APP_ID`
-- `META_APP_SECRET`
+Подписки Instagram:
 
-`APP_BASE_URL` желательно задать явно, но если не задан, приложение попробует определить Render-домен автоматически.
+```text
+comments
+mentions
+messages
+```
 
-## Debug matching
+## Проверка
 
-Если webhook приходит, но статус `ignored`, открой:
+1. Открой `/healthz` — база должна быть connected.
+2. Открой `/api/meta/debug` — проверь callbackUrl и webhookUrl.
+3. Подключи Instagram заново через кнопку в панели.
+4. Создай правило с ключевым словом.
+5. Оставь комментарий с другого Instagram аккаунта под постом подключенного аккаунта.
+6. В «Логи» статус должен стать `sent` или `error` с понятной причиной.
 
-`/api/debug/match?text=ремонт`
+## Почему debug больше не отправляет в Instagram
 
-Теперь в логах `ignored` сохраняется причина: `no_enabled_rules`, `keyword_not_matched`, `no_active_instagram_accounts`, `empty_comment_text`.
+Meta принимает ответы только на реальные comment id из webhook. Fake id вида `test_...` всегда будет давать ошибку `Object with ID does not exist`. Поэтому тестовая кнопка теперь проверяет только matching и формирует статус `simulation_ok`.

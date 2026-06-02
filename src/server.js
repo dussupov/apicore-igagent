@@ -139,7 +139,7 @@ app.get('/auth/meta/start', requireAuth, async (req,res)=>{
     if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
     const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-    const scope = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
+    const scope = ['pages_show_list','pages_read_engagement','pages_messaging','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
     const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
     res.redirect(url);
   } catch(e) {
@@ -263,7 +263,7 @@ app.post('/webhook/meta', async (req,res)=>{
 
 app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
   const event = { field:'comments', value:{ id:`test_${Date.now()}`, text:req.body.text || 'ремонт', from:{username:'test_user'} } };
-  const out = await processCommentEvent(event); res.json(out);
+  const out = await processCommentEvent(event, { simulate: true }); res.json(out);
 });
 
 app.get('/api/debug/match', requireAuth, requireDb, asyncRoute(async (req,res)=>{
