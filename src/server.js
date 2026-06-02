@@ -7,6 +7,8 @@ import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstag
 import { processCommentEvent } from './automation.js';
 
 const app = express();
+const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+app.set('trust proxy', true);
 await initDb();
 
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -36,6 +38,47 @@ app.get('/api/system', (req, res) => {
   });
 });
 
+
+function publicBaseUrl(req) {
+  const fromSettings = process.env.APP_BASE_URL;
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const host = req.get('host');
+  return (fromSettings && fromSettings.trim()) ? fromSettings.trim().replace(/\/$/, '') : `${proto}://${host}`;
+}
+
+async function getRuntimeMetaConfig(req) {
+  const cfg = await metaConfig();
+  cfg.baseUrl = (cfg.baseUrl || publicBaseUrl(req)).replace(/\/$/, '');
+  return cfg;
+}
+
+function htmlError(title, details = '', fixes = []) {
+  const list = fixes.length ? `<ul>${fixes.map(x => `<li>${x}</li>`).join('')}</ul>` : '';
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:Inter,Arial,sans-serif;background:#0b1020;color:#eef2ff;padding:32px}a{color:#93c5fd}.card{max-width:880px;background:#111936;border:1px solid #26345f;border-radius:18px;padding:24px}.err{color:#fca5a5;white-space:pre-wrap;background:#1f2937;padding:14px;border-radius:12px}.ok{color:#86efac}</style></head><body><div class="card"><h1>${title}</h1>${details?`<div class="err">${details}</div>`:''}${list}<p><a href="/">← Вернуться в панель</a></p></div></body></html>`;
+}
+
+async function validateMetaReady(req) {
+  if (!pool || !databaseState.connected) {
+    return { ok:false, title:'PostgreSQL не подключен', details:databaseState.message, fixes:[
+      'В Render создай PostgreSQL базу.',
+      'В Web Service → Environment добавь DATABASE_URL = Internal Database URL.',
+      'После этого сделай Manual Deploy → Clear build cache & deploy.'
+    ] };
+  }
+  const cfg = await getRuntimeMetaConfig(req);
+  const missing = [];
+  if (!cfg.appId) missing.push('META_APP_ID');
+  if (!cfg.appSecret) missing.push('META_APP_SECRET');
+  if (!cfg.graphVersion) missing.push('META_GRAPH_VERSION');
+  if (!cfg.baseUrl) missing.push('APP_BASE_URL');
+  if (missing.length) return { ok:false, title:'Не заполнены Meta настройки', details:`Не хватает: ${missing.join(', ')}`, fixes:[
+    'Открой вкладку «Секреты / Настройки» и заполни поля.',
+    'Или добавь эти переменные в Render → Environment.',
+    'APP_BASE_URL должен быть твоим доменом Render, например https://apicore-igagent.onrender.com.'
+  ] };
+  return { ok:true, cfg };
+}
+
 function requireDb(req, res, next) {
   if (pool && databaseState.connected) return next();
   return res.status(503).json({
@@ -55,16 +98,23 @@ app.post('/api/login', async (req,res)=> res.json({ok:true, authDisabled:true}))
 app.post('/api/logout', (req,res)=> res.json({ok:true, authDisabled:true}));
 app.get('/api/me', (req,res)=> res.json({user:{username:'owner', authDisabled:true}}));
 
-app.get('/api/dashboard', requireAuth, requireDb, async (req,res)=>{
-  const [[accounts],[rules],[today],[sent],[errors]] = await Promise.all([
-    query('SELECT COUNT(*)::int n FROM instagram_accounts'),
-    query('SELECT COUNT(*)::int n FROM automation_rules WHERE enabled=TRUE'),
-    query("SELECT COUNT(*)::int n FROM automation_logs WHERE created_at > NOW() - INTERVAL '24 hours'"),
-    query("SELECT COUNT(*)::int n FROM automation_logs WHERE status='sent' AND created_at > NOW() - INTERVAL '24 hours'"),
-    query("SELECT COUNT(*)::int n FROM automation_logs WHERE status='error' AND created_at > NOW() - INTERVAL '24 hours'")
+app.get('/api/dashboard', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const [accountsRes, rulesRes, todayRes, sentRes, errorsRes] = await Promise.all([
+    query('SELECT COUNT(*)::int AS n FROM instagram_accounts'),
+    query('SELECT COUNT(*)::int AS n FROM automation_rules WHERE enabled=TRUE'),
+    query("SELECT COUNT(*)::int AS n FROM automation_logs WHERE created_at > NOW() - INTERVAL '24 hours'"),
+    query("SELECT COUNT(*)::int AS n FROM automation_logs WHERE status='sent' AND created_at > NOW() - INTERVAL '24 hours'"),
+    query("SELECT COUNT(*)::int AS n FROM automation_logs WHERE status='error' AND created_at > NOW() - INTERVAL '24 hours'")
   ]);
-  res.json({accounts:accounts.rows[0].n,rules:rules.rows[0].n,today:today.rows[0].n,sent:sent.rows[0].n,errors:errors.rows[0].n});
-});
+  const count = (result) => Number(result?.rows?.[0]?.n || 0);
+  res.json({
+    accounts: count(accountsRes),
+    rules: count(rulesRes),
+    today: count(todayRes),
+    sent: count(sentRes),
+    errors: count(errorsRes)
+  });
+}));
 
 app.get('/api/settings', requireAuth, requireDb, async (req,res)=>{
   const keys = ['META_APP_ID','META_APP_SECRET','META_GRAPH_VERSION','META_WEBHOOK_VERIFY_TOKEN','APP_BASE_URL','DRY_RUN','DEFAULT_RATE_LIMIT_PER_MINUTE'];
@@ -83,20 +133,48 @@ app.post('/api/settings', requireAuth, requireDb, async (req,res)=>{
   res.json({ok:true});
 });
 
-app.get('/auth/meta/start', requireAuth, requireDb, async (req,res)=>{
-  const cfg = await metaConfig();
-  const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-  const scope = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
-  const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
-  res.redirect(url);
-});
-app.get('/auth/meta/callback', requireAuth, requireDb, async (req,res)=>{
+app.get('/auth/meta/start', requireAuth, async (req,res)=>{
   try {
-    const cfg = await metaConfig();
+    const ready = await validateMetaReady(req);
+    if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
+    const cfg = ready.cfg;
+    const redirect = `${cfg.baseUrl}/auth/meta/callback`;
+    const scope = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
+    const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
+    res.redirect(url);
+  } catch(e) {
+    console.error('[META_START_ERROR]', e?.response?.data || e);
+    res.status(200).send(htmlError('Ошибка запуска Meta OAuth', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
+      'Проверь META_APP_ID, META_APP_SECRET и APP_BASE_URL.',
+      'APP_BASE_URL должен совпадать с доменом Render.',
+      'Проверь /healthz.'
+    ]));
+  }
+});
+app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
+  try {
+    const ready = await validateMetaReady(req);
+    if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
+    if (req.query.error || !req.query.code) {
+      return res.status(200).send(htmlError('Meta не вернула code', JSON.stringify(req.query,null,2), [
+        'Проверь Valid OAuth Redirect URI в Meta App.',
+        `Добавь точный callback: ${ready.cfg.baseUrl}/auth/meta/callback`,
+        'Проверь, что приложение в Development и твой Facebook-профиль добавлен как Admin/Developer/Tester.'
+      ]));
+    }
+    const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
     const shortToken = await exchangeCodeForToken(req.query.code, redirect);
     const longToken = await exchangeLongLived(shortToken.access_token);
     const pages = await getPagesWithInstagram(longToken.access_token);
+    if (!pages.length) {
+      return res.status(200).send(htmlError('Instagram аккаунты не найдены', 'Meta OAuth прошёл, но /me/accounts не вернул страниц с instagram_business_account.', [
+        'Instagram должен быть Professional и привязан к Facebook Page.',
+        'Разреши доступ к нужной Facebook Page в окне Meta Login.',
+        'Для Creator может не всё отображаться стабильно — лучше Business аккаунт.',
+        'Проверь permissions: pages_show_list, pages_read_engagement, instagram_basic.'
+      ]));
+    }
     for (const p of pages) {
       await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
         VALUES($1,$2,$3,$4,$5,NOW() + INTERVAL '55 days',NOW())
@@ -105,8 +183,29 @@ app.get('/auth/meta/callback', requireAuth, requireDb, async (req,res)=>{
     }
     res.redirect('/?connected=1');
   } catch(e) {
-    res.status(500).send(`<pre>Meta OAuth error: ${e?.response?.data ? JSON.stringify(e.response.data,null,2) : e.message}</pre>`);
+    console.error('[META_CALLBACK_ERROR]', e?.response?.data || e);
+    res.status(200).send(htmlError('Meta OAuth error', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
+      'Проверь, что в Meta App добавлен Valid OAuth Redirect URI: APP_BASE_URL/auth/meta/callback.',
+      'Проверь, что APP_BASE_URL в настройках равен текущему домену Render без слэша на конце.',
+      'Проверь, что App Secret правильный.',
+      'Если приложение в Development, подключайся Facebook-профилем, который добавлен в роли приложения.'
+    ]));
   }
+});
+
+app.get('/api/meta/debug', requireAuth, async (req,res)=>{
+  const cfg = await getRuntimeMetaConfig(req);
+  res.json({
+    database: databaseState.connected ? 'connected' : (pool ? 'error' : 'not_configured'),
+    databaseMessage: databaseState.message,
+    baseUrl: cfg.baseUrl,
+    callbackUrl: `${cfg.baseUrl}/auth/meta/callback`,
+    webhookUrl: `${cfg.baseUrl}/webhook/meta`,
+    hasAppId: Boolean(cfg.appId),
+    hasAppSecret: Boolean(cfg.appSecret),
+    graphVersion: cfg.graphVersion,
+    dryRun: cfg.dryRun
+  });
 });
 
 app.get('/api/accounts', requireAuth, requireDb, async (req,res)=>{
@@ -162,6 +261,16 @@ app.post('/webhook/meta', async (req,res)=>{
 app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
   const event = { field:'comments', value:{ id:`test_${Date.now()}`, text:req.body.text || 'ремонт', from:{username:'test_user'} } };
   const out = await processCommentEvent(event); res.json(out);
+});
+
+app.use((err, req, res, next) => {
+  console.error('[REQUEST_ERROR]', req.method, req.originalUrl, err?.stack || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: err?.message || String(err),
+    path: req.originalUrl
+  });
 });
 
 const port = process.env.PORT || 10000;

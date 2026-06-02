@@ -118,3 +118,34 @@ Webhook verify token должен совпадать с `META_WEBHOOK_VERIFY_TOK
 ## Ограничения v1
 
 Проверка «подписан пользователь или нет» не включена, потому что официальный Instagram Graph API не всегда даёт надёжный способ проверить любого пользователя на подписку. Эту функцию лучше добавлять после проверки доступных permissions и App Review.
+
+
+## Если при подключении Instagram появляется 503
+
+В этой версии OAuth больше не должен ронять сервис. Открой:
+
+```
+https://YOUR-RENDER-DOMAIN/healthz
+https://YOUR-RENDER-DOMAIN/api/meta/debug
+```
+
+Проверь:
+
+- `database` должен быть `connected`;
+- `hasAppId` должен быть `true`;
+- `hasAppSecret` должен быть `true`;
+- `callbackUrl` нужно добавить в Meta App → Facebook Login → Valid OAuth Redirect URIs.
+
+Для Render укажи переменные окружения:
+
+```env
+DATABASE_URL=Internal Database URL from Render PostgreSQL
+APP_BASE_URL=https://YOUR-RENDER-DOMAIN.onrender.com
+META_APP_ID=your_app_id
+META_APP_SECRET=your_app_secret
+META_GRAPH_VERSION=v23.0
+META_WEBHOOK_VERIFY_TOKEN=any_random_token
+DRY_RUN=true
+```
+
+После изменения Environment Variables сделай `Manual Deploy → Clear build cache & deploy`.
