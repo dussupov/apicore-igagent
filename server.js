@@ -1,456 +1,325 @@
-const express = require("express");
-const axios   = require("axios");
-const crypto  = require("crypto");
-const fs      = require("fs");
-const path    = require("path");
+const express  = require("express");
+const axios    = require("axios");
+const crypto   = require("crypto");
+const bcrypt   = require("bcryptjs");
+const jwt      = require("jsonwebtoken");
+const path     = require("path");
+const { v4: uuid } = require("uuid");
 
-const {
-  buildAuthUrl,
-  validateState,
-  exchangeCodeForToken,
-  getInstagramAccounts,
-  subscribePageWebhook,
-} = require("./oauth");
+const db = require("./db");
+const { handleKeywordComment, handleIncomingDM, log } = require("./agent");
 
-const app = express();
+const app    = express();
+const SECRET = process.env.JWT_SECRET || "ig_agent_secret_change_in_prod";
+const BASE   = "https://graph.facebook.com/v19.0";
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const CONFIG_PATH = path.join(__dirname, "config.json");
-
-// ─── OAUTH РЕЗУЛЬТАТЫ (polling вместо postMessage) ────────────────────────────
-// Храним результат авторизации по session-токену, фронтенд опрашивает /api/oauth/result/:token
-const oauthResults = new Map(); // token → { status, data, expires }
-
-function setOAuthResult(token, status, data) {
-  oauthResults.set(token, { status, data, expires: Date.now() + 5 * 60 * 1000 });
+// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
+function auth(req, res, next) {
+  const token = (req.headers.authorization || "").replace("Bearer ", "");
+  if (!token) return res.status(401).json({ error: "Не авторизован" });
+  try { req.user = jwt.verify(token, SECRET); next(); }
+  catch { res.status(401).json({ error: "Токен недействителен" }); }
 }
 
-function getOAuthResult(token) {
-  const r = oauthResults.get(token);
-  if (!r) return null;
-  if (r.expires < Date.now()) { oauthResults.delete(token); return null; }
-  return r;
-}
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
+app.post("/api/register", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)   return res.status(400).json({ error: "Заполните email и пароль" });
+  if (password.length < 6)   return res.status(400).json({ error: "Пароль минимум 6 символов" });
+  if (db.prepare("SELECT id FROM users WHERE email=?").get(email))
+    return res.status(400).json({ error: "Email уже зарегистрирован" });
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-function loadConfig() {
-  if (!fs.existsSync(CONFIG_PATH)) {
-    const defaults = {
-      appId: "", appSecret: "", redirectUri: "",
-      verifyToken: crypto.randomBytes(16).toString("hex"),
-      accounts: [], scenarios: [],
-      commentReplies: ["Написал(а) вам в директ, там всё подробно"],
-    };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaults, null, 2));
-    return defaults;
-  }
-  const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  // Миграция старого ключа
-  if (cfg.oauthRedirectUri && !cfg.redirectUri) {
-    cfg.redirectUri = cfg.oauthRedirectUri;
-    delete cfg.oauthRedirectUri;
-  }
-  if (!cfg.verifyToken) {
-    cfg.verifyToken = crypto.randomBytes(16).toString("hex");
-    saveConfig(cfg);
-  }
-  return cfg;
-}
+  const id   = uuid();
+  const hash = await bcrypt.hash(password, 10);
+  db.prepare("INSERT INTO users (id,email,password) VALUES (?,?,?)").run(id, email, hash);
 
-function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
-}
+  const defaultReplies = [
+    "Написал(а) вам в директ, там всё подробно",
+    "Отправил(а) информацию в личные сообщения",
+    "В директе уже всё есть — загляните",
+    "Ответил(а) в личку",
+    "Написали вам — проверьте входящие",
+  ];
+  defaultReplies.forEach(text =>
+    db.prepare("INSERT INTO replies (id,user_id,text) VALUES (?,?,?)").run(uuid(), id, text)
+  );
 
-// Строим redirectUri — ВСЕГДА /auth/callback, берём из конфига или из заголовков
-function getRedirectUri(req, cfg) {
-  if (cfg.redirectUri && cfg.redirectUri.trim()) {
-    return cfg.redirectUri.trim().replace(/\/auth\/instagram\/?$/, "/auth/callback");
-  }
-  const proto = req.headers["x-forwarded-proto"] || req.protocol;
-  const host  = req.headers["x-forwarded-host"]  || req.get("host");
-  return `${proto}://${host}/auth/callback`;
-}
-
-// ─── ЛОГИ ─────────────────────────────────────────────────────────────────────
-const userState = new Map();
-const eventLog  = [];
-
-function log(type, account, message, ok = true) {
-  const entry = { time: new Date().toISOString(), type, account, message, ok };
-  eventLog.unshift(entry);
-  if (eventLog.length > 500) eventLog.pop();
-  console.log(`[${entry.time}] [${type}] ${account}: ${message}`);
-}
-
-// ─── OAUTH ────────────────────────────────────────────────────────────────────
-
-app.get("/auth/instagram", (req, res) => {
-  const cfg = loadConfig();
-  if (!cfg.appId || !cfg.appSecret) {
-    return res.status(400).json({ error: "Заполните ID и секрет приложения в Настройках" });
-  }
-  const redirectUri   = getRedirectUri(req, cfg);
-  const sessionToken  = crypto.randomBytes(16).toString("hex");
-  const { url, state } = buildAuthUrl({ appId: cfg.appId, redirectUri });
-
-  // Связываем state с sessionToken чтобы в callback знать кому вернуть результат
-  // sessionToken передаём фронтенду — он им будет опрашивать /api/oauth/result/:token
-  // Сохраняем в state-маппинге дополнительно sessionToken
-  // (buildAuthUrl уже сохранил redirectUri в pendingStates[state])
-  // Добавляем sessionToken через отдельную карту
-  oauthSessions.set(state, sessionToken);
-  setTimeout(() => oauthSessions.delete(state), 10 * 60 * 1000);
-
-  res.json({ url, sessionToken, redirectUri });
+  const token = jwt.sign({ id, email }, SECRET, { expiresIn: "30d" });
+  res.json({ token, email });
 });
 
-// Карта state → sessionToken
-const oauthSessions = new Map();
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = db.prepare("SELECT * FROM users WHERE email=?").get(email);
+  if (!user) return res.status(400).json({ error: "Email не найден" });
+  if (!await bcrypt.compare(password, user.password))
+    return res.status(400).json({ error: "Неверный пароль" });
+  const token = jwt.sign({ id: user.id, email: user.email }, SECRET, { expiresIn: "30d" });
+  res.json({ token, email: user.email });
+});
 
-app.get("/auth/callback", async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+// ─── FB SDK TOKEN EXCHANGE ────────────────────────────────────────────────────
+// Фронтенд получает short-lived token через FB SDK и передаёт сюда
+// Сервер меняет его на long-lived и сохраняет аккаунт
+app.post("/api/accounts/connect", auth, async (req, res) => {
+  const { accessToken, userID } = req.body;
+  if (!accessToken || !userID)
+    return res.status(400).json({ error: "accessToken и userID обязательны" });
 
-  const sessionToken = oauthSessions.get(state);
-
-  // HTML-страница которая красиво закрывает popup
-  const closePage = (title, msg, isError) => res.send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<style>
-  body{font-family:system-ui,sans-serif;background:#0e0e10;color:#f0f0f2;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-  .box{text-align:center;padding:32px;background:#16161a;border-radius:14px;border:1px solid ${isError?'#ef4444':'#22c55e'};max-width:360px}
-  .icon{font-size:40px;margin-bottom:12px}
-  h2{margin:0 0 8px;font-size:18px}
-  p{color:#8a8a9a;font-size:14px;margin:0 0 20px}
-  .hint{font-size:12px;color:#52525e}
-</style></head><body>
-<div class="box">
-  <div class="icon">${isError ? '❌' : '✅'}</div>
-  <h2>${title}</h2>
-  <p>${msg}</p>
-  <div class="hint">Это окно закроется автоматически...</div>
-</div>
-<script>
-  // Закрываем через 2 секунды
-  setTimeout(() => { try { window.close(); } catch(e){} }, 2000);
-</script>
-</body></html>`);
-
-  if (error) {
-    if (sessionToken) setOAuthResult(sessionToken, "error", { message: error_description || error });
-    oauthSessions.delete(state);
-    return closePage("Ошибка авторизации", error_description || error, true);
-  }
-
-  // validateState теперь возвращает redirectUri (или null если невалидный)
-  const redirectUri = validateState(state);
-  if (!redirectUri) {
-    if (sessionToken) setOAuthResult(sessionToken, "error", { message: "Ошибка безопасности (invalid state). Попробуйте снова." });
-    return closePage("Ошибка безопасности", "Попробуйте начать авторизацию заново.", true);
-  }
-
-  oauthSessions.delete(state);
+  const cfg = loadServerConfig();
+  if (!cfg.appId || !cfg.appSecret)
+    return res.status(400).json({ error: "Заполните App ID и App Secret в настройках сервера (config.json)" });
 
   try {
-    const cfg = loadConfig();
-
-    const { accessToken, expiresAt } = await exchangeCodeForToken({
-      code, appId: cfg.appId, appSecret: cfg.appSecret, redirectUri,
+    // 1. Short-lived → long-lived token (60 дней)
+    const longRes = await axios.get(BASE + "/oauth/access_token", {
+      params: {
+        grant_type:        "fb_exchange_token",
+        client_id:         cfg.appId,
+        client_secret:     cfg.appSecret,
+        fb_exchange_token: accessToken,
+      },
     });
+    const longToken  = longRes.data.access_token;
+    const expiresIn  = longRes.data.expires_in || 5184000;
+    const tokenExpiry = new Date(Date.now() + expiresIn * 1000).toISOString().slice(0, 10);
 
-    const igAccounts = await getInstagramAccounts(accessToken);
+    // 2. Получаем FB-страницы пользователя
+    const pagesRes = await axios.get(BASE + "/me/accounts", {
+      params: { access_token: longToken, fields: "id,name,access_token,instagram_business_account" },
+    });
+    const pages = pagesRes.data.data || [];
 
-    if (!igAccounts.length) {
-      const msg = "Instagram Business-аккаунтов не найдено. Убедитесь что аккаунт бизнес/автор и привязан к Facebook-странице.";
-      if (sessionToken) setOAuthResult(sessionToken, "error", { message: msg });
-      return closePage("Аккаунт не найден", msg, true);
-    }
+    if (!pages.length)
+      return res.status(400).json({ error: "Нет Facebook-страниц. Создайте страницу и привяжите Instagram Business аккаунт." });
 
     const saved = [];
-    for (const acct of igAccounts) {
-      const existing = cfg.accounts.find(a => a.pageId === acct.pageId);
-      if (existing) {
-        existing.token = acct.pageToken; existing.tokenExpiry = expiresAt;
-        existing.followers = acct.followers; existing.avatar = acct.avatar;
-        saved.push(existing);
-      } else {
-        const newAcct = {
-          id: Date.now() + Math.floor(Math.random() * 1000),
-          username: acct.username, displayName: acct.displayName,
-          pageId: acct.pageId, igId: acct.igId,
-          token: acct.pageToken, tokenExpiry: expiresAt,
-          followers: acct.followers, avatar: acct.avatar,
-          active: true, link: "",
-        };
-        cfg.accounts.push(newAcct);
-        saved.push(newAcct);
+    for (const page of pages) {
+      if (!page.instagram_business_account) continue;
+      const igId = page.instagram_business_account.id;
+
+      // 3. Данные Instagram аккаунта
+      let igData = {};
+      try {
+        const r = await axios.get(BASE + "/" + igId, {
+          params: { fields: "id,username,name,profile_picture_url", access_token: page.access_token },
+        });
+        igData = r.data;
+      } catch (e) {
+        console.warn("[connect] Не удалось получить IG данные:", e.message);
       }
-      try { await subscribePageWebhook(acct.pageId, acct.pageToken); }
-      catch (e) { console.warn(`Webhook для ${acct.pageId}:`, e.message); }
+
+      // 4. Сохраняем или обновляем
+      const existing = db.prepare("SELECT * FROM ig_accounts WHERE user_id=? AND ig_user_id=?")
+        .get(req.user.id, igId);
+
+      if (existing) {
+        db.prepare("UPDATE ig_accounts SET access_token=?,token_expiry=?,active=1 WHERE id=?")
+          .run(page.access_token, tokenExpiry, existing.id);
+        saved.push({ ...existing, access_token: "***", username: existing.username });
+      } else {
+        const id = uuid();
+        db.prepare(`INSERT INTO ig_accounts
+          (id,user_id,ig_user_id,username,full_name,avatar,page_id,page_name,access_token,token_expiry)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`)
+          .run(id, req.user.id, igId,
+            igData.username || "", igData.name || "",
+            igData.profile_picture_url || "",
+            page.id, page.name, page.access_token, tokenExpiry);
+
+        // Подписываем страницу на webhook
+        try {
+          await axios.post(BASE + "/" + page.id + "/subscribed_apps",
+            { subscribed_fields: ["comments", "messages"] },
+            { params: { access_token: page.access_token } }
+          );
+        } catch (e) {
+          console.warn("[webhook] Ошибка подписки:", e.response?.data?.error?.message || e.message);
+        }
+
+        saved.push({ id, username: igData.username, full_name: igData.name });
+        log(req.user.id, igData.username || page.name, "login",
+          "Аккаунт подключён через Facebook SDK");
+      }
     }
 
-    saveConfig(cfg);
-    log("oauth", igAccounts.map(a => `@${a.username}`).join(", "), `Подключено: ${igAccounts.length}`);
+    if (!saved.length)
+      return res.status(400).json({
+        error: "Instagram Business-аккаунт не найден.\n\nПроверьте:\n1. Аккаунт переведён в «Бизнес» или «Автор»\n2. Instagram привязан к Facebook-странице"
+      });
 
-    if (sessionToken) setOAuthResult(sessionToken, "success", { accounts: saved });
-    closePage("Аккаунт подключён!", `Подключено: ${saved.map(a => "@" + (a.username || a.displayName)).join(", ")}`, false);
-
-  } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
-    console.error("OAuth error:", err.response?.data || err.message);
-    if (sessionToken) setOAuthResult(sessionToken, "error", { message: msg });
-    closePage("Ошибка подключения", msg, true);
+    res.json({ ok: true, accounts: saved });
+  } catch (e) {
+    const msg = e.response?.data?.error?.message || e.message;
+    console.error("[connect]", msg);
+    res.status(500).json({ error: msg });
   }
 });
 
-// Фронтенд опрашивает этот эндпоинт пока popup открыт
-app.get("/api/oauth/result/:token", (req, res) => {
-  const result = getOAuthResult(req.params.token);
-  if (!result) return res.json({ status: "pending" });
-  oauthResults.delete(req.params.token);
-  res.json(result);
+// ─── ACCOUNTS ─────────────────────────────────────────────────────────────────
+app.get("/api/accounts", auth, (req, res) => {
+  const rows = db.prepare(
+    "SELECT id,ig_user_id,username,full_name,avatar,page_name,token_expiry,active,link FROM ig_accounts WHERE user_id=?"
+  ).all(req.user.id);
+  res.json(rows.map(a => {
+    const exp  = new Date(a.token_expiry);
+    const days = Math.ceil((exp - Date.now()) / 86400000);
+    return { ...a, tokenDays: isNaN(days) ? null : days };
+  }));
 });
 
-// ─── WEBHOOK ──────────────────────────────────────────────────────────────────
+app.patch("/api/accounts/:id", auth, (req, res) => {
+  const a = db.prepare("SELECT * FROM ig_accounts WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
+  if (!a) return res.status(404).json({ error: "Не найдено" });
+  if (req.body.active !== undefined)
+    db.prepare("UPDATE ig_accounts SET active=? WHERE id=?").run(req.body.active ? 1 : 0, req.params.id);
+  if (req.body.link !== undefined)
+    db.prepare("UPDATE ig_accounts SET link=? WHERE id=?").run(req.body.link, req.params.id);
+  res.json({ ok: true });
+});
 
+app.delete("/api/accounts/:id", auth, (req, res) => {
+  db.prepare("DELETE FROM ig_accounts WHERE id=? AND user_id=?").run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+// ─── SCENARIOS ────────────────────────────────────────────────────────────────
+app.get("/api/scenarios", auth, (req, res) => {
+  const rows = db.prepare("SELECT * FROM scenarios WHERE user_id=?").all(req.user.id);
+  res.json(rows.map(s => ({
+    ...s,
+    keywords:    JSON.parse(s.keywords    || "[]"),
+    account_ids: JSON.parse(s.account_ids || "[]"),
+  })));
+});
+
+app.post("/api/scenarios", auth, (req, res) => {
+  const id = uuid();
+  const { name, keywords, dm_text, follow_up, account_ids } = req.body;
+  db.prepare("INSERT INTO scenarios (id,user_id,name,keywords,dm_text,follow_up,account_ids) VALUES (?,?,?,?,?,?,?)")
+    .run(id, req.user.id, name || "Новый сценарий",
+      JSON.stringify(keywords || []), dm_text || "", follow_up ? 1 : 0,
+      JSON.stringify(account_ids || []));
+  res.json({ ok: true, id });
+});
+
+app.put("/api/scenarios/:id", auth, (req, res) => {
+  const s = db.prepare("SELECT * FROM scenarios WHERE id=? AND user_id=?").get(req.params.id, req.user.id);
+  if (!s) return res.status(404).json({ error: "Не найдено" });
+  const { name, keywords, dm_text, follow_up, account_ids } = req.body;
+  db.prepare("UPDATE scenarios SET name=?,keywords=?,dm_text=?,follow_up=?,account_ids=? WHERE id=?")
+    .run(name, JSON.stringify(keywords || []), dm_text, follow_up ? 1 : 0,
+      JSON.stringify(account_ids || []), req.params.id);
+  res.json({ ok: true });
+});
+
+app.delete("/api/scenarios/:id", auth, (req, res) => {
+  db.prepare("DELETE FROM scenarios WHERE id=? AND user_id=?").run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+// ─── REPLIES ──────────────────────────────────────────────────────────────────
+app.get("/api/replies", auth, (req, res) => {
+  res.json(db.prepare("SELECT * FROM replies WHERE user_id=?").all(req.user.id));
+});
+app.post("/api/replies", auth, (req, res) => {
+  const id = uuid();
+  db.prepare("INSERT INTO replies (id,user_id,text) VALUES (?,?,?)").run(id, req.user.id, req.body.text);
+  res.json({ ok: true, id });
+});
+app.put("/api/replies/:id", auth, (req, res) => {
+  db.prepare("UPDATE replies SET text=? WHERE id=? AND user_id=?").run(req.body.text, req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+app.delete("/api/replies/:id", auth, (req, res) => {
+  db.prepare("DELETE FROM replies WHERE id=? AND user_id=?").run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+// ─── LOGS ─────────────────────────────────────────────────────────────────────
+app.get("/api/logs", auth, (req, res) => {
+  res.json(db.prepare("SELECT * FROM event_logs WHERE user_id=? ORDER BY id DESC LIMIT 100").all(req.user.id));
+});
+
+// ─── SERVER CONFIG (appId/appSecret) ─────────────────────────────────────────
+const fs   = require("fs");
+const CONF = path.join(__dirname, "config.json");
+
+function loadServerConfig() {
+  if (!fs.existsSync(CONF)) {
+    fs.writeFileSync(CONF, JSON.stringify({ appId: "", appSecret: "", verifyToken: "ig_verify_token" }, null, 2));
+  }
+  return JSON.parse(fs.readFileSync(CONF, "utf8"));
+}
+
+app.get("/api/server-config", auth, (req, res) => {
+  const c = loadServerConfig();
+  res.json({ appId: c.appId, verifyToken: c.verifyToken, hasSecret: !!c.appSecret });
+});
+
+app.post("/api/server-config", auth, (req, res) => {
+  const c = loadServerConfig();
+  if (req.body.appId       !== undefined) c.appId       = req.body.appId;
+  if (req.body.appSecret   !== undefined) c.appSecret   = req.body.appSecret;
+  if (req.body.verifyToken !== undefined) c.verifyToken = req.body.verifyToken;
+  fs.writeFileSync(CONF, JSON.stringify(c, null, 2));
+  res.json({ ok: true });
+});
+
+// Публичный эндпоинт для FB SDK — отдаём appId фронтенду
+app.get("/api/public/app-id", (req, res) => {
+  const c = loadServerConfig();
+  res.json({ appId: c.appId });
+});
+
+// ─── WEBHOOK ─────────────────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
-  const cfg = loadConfig();
+  const c = loadServerConfig();
   const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
-  if (mode === "subscribe" && token === cfg.verifyToken) return res.send(challenge);
+  if (mode === "subscribe" && token === c.verifyToken) {
+    console.log("[webhook] Верифицирован");
+    return res.send(challenge);
+  }
   res.status(403).send("Forbidden");
 });
 
 app.post("/webhook", (req, res) => {
-  const cfg = loadConfig();
-  if (cfg.appSecret) {
-    const sig      = req.headers["x-hub-signature-256"];
-    const expected = "sha256=" + crypto.createHmac("sha256", cfg.appSecret)
-      .update(JSON.stringify(req.body)).digest("hex");
-    if (sig !== expected) return res.status(403).send("Invalid signature");
-  }
   res.status(200).send("EVENT_RECEIVED");
   const body = req.body;
   if (!body.object) return;
 
-  body.entry?.forEach(entry => {
-    const account = cfg.accounts.find(a => a.pageId === entry.id && a.active);
+  (body.entry || []).forEach(entry => {
+    // Находим аккаунт по page_id
+    const account = db.prepare("SELECT * FROM ig_accounts WHERE page_id=? AND active=1").get(entry.id);
     if (!account) return;
-    entry.changes?.forEach(change => {
+
+    // Комментарии
+    (entry.changes || []).forEach(change => {
       if (change.field === "comments") {
-        const { from, id: commentId, message } = change.value;
-        const scenario = findScenario(cfg.scenarios, account.id, message || "");
-        if (from?.id && commentId && scenario) {
-          log("keyword", `@${account.username}`, `"${message?.slice(0,30)}" → "${scenario.name}"`);
-          handleComment(account, scenario, cfg.commentReplies, from.id, commentId);
+        const { from, id: commentId, text } = change.value;
+        if (from && commentId && text) {
+          handleKeywordComment(account, commentId, text, from.id, from.username);
         }
       }
-      if (change.field === "follows") {
-        if (change.value?.id) handleFollow(account, change.value.id);
-      }
     });
-    entry.messaging?.forEach(event => {
-      if (event.message && !event.message.is_echo && event.sender?.id)
-        handleDM(account, event.sender.id, event.message?.text || "");
+
+    // Входящие DM
+    (entry.messaging || []).forEach(event => {
+      if (event.message && !event.message.is_echo) {
+        const text = event.message?.text;
+        const from = event.sender;
+        if (from && text) {
+          handleIncomingDM(account, from.id, from.username || "", text);
+        }
+      }
     });
   });
 });
 
-// ─── ЛОГИКА АГЕНТА ────────────────────────────────────────────────────────────
-
-function findScenario(scenarios, accountId, text) {
-  const lower = text.toLowerCase();
-  return scenarios.find(s =>
-    (s.accountIds || []).includes(accountId) &&
-    (s.keywords   || []).some(k => lower.includes(k.toLowerCase()))
-  );
-}
-
-function stateKey(accountId, userId) { return `${accountId}:${userId}`; }
-
-async function getUserName(token, userId) {
-  try {
-    const r = await axios.get(`https://graph.facebook.com/v19.0/${userId}`, {
-      params: { fields: "name", access_token: token },
-    });
-    return r.data.name || "друг";
-  } catch { return "друг"; }
-}
-
-async function replyComment(token, commentId, text) {
-  try {
-    await axios.post(`https://graph.facebook.com/v19.0/${commentId}/replies`,
-      { message: text }, { params: { access_token: token } });
-  } catch (e) { console.error("reply:", e.response?.data); }
-}
-
-async function sendDM(token, pageId, userId, text) {
-  try {
-    await axios.post(`https://graph.facebook.com/v19.0/${pageId}/messages`,
-      { recipient: { id: userId }, message: { text }, messaging_type: "RESPONSE" },
-      { params: { access_token: token } });
-  } catch (e) { console.error("dm:", e.response?.data); }
-}
-
-async function handleComment(account, scenario, replies, userId, commentId) {
-  const key = stateKey(account.id, userId);
-  const state = userState.get(key) || {};
-  if (state.commentReplied) return;
-  const name  = await getUserName(account.token, userId);
-  const reply = replies.length ? replies[Math.floor(Math.random() * replies.length)] : "Написал(а) в директ";
-  await replyComment(account.token, commentId, reply);
-  log("comment_reply", `@${account.username}`, reply.slice(0, 50));
-  await new Promise(r => setTimeout(r, 2000));
-  await sendDM(account.token, account.pageId, userId, `${name}, ${scenario.dmText}`);
-  log("dm_sent", `@${account.username}`, `DM → ${userId}`);
-  const link = scenario.link || account.link || "";
-  const isFollower = (userState.get(key) || {}).isFollower;
-  await new Promise(r => setTimeout(r, 2500));
-  if (isFollower && link) {
-    await sendDM(account.token, account.pageId, userId, `${name}, вот ваша ссылка:\n\n${link}`);
-    userState.set(key, { ...state, commentReplied: true, linkSent: true });
-    log("link_sent", `@${account.username}`, `Ссылка → ${userId}`);
-  } else {
-    if (link) await sendDM(account.token, account.pageId, userId,
-      `${name}, подпишитесь на аккаунт и напишите "готово" — пришлю ссылку`);
-    const timer = scenario.followUp ? setTimeout(async () => {
-      const cur = userState.get(key) || {};
-      if (!cur.linkSent && link) {
-        if (cur.isFollower) {
-          await sendDM(account.token, account.pageId, userId, `${name}, вот ваша ссылка:\n\n${link}`);
-          userState.set(key, { ...cur, linkSent: true });
-        } else {
-          await sendDM(account.token, account.pageId, userId,
-            `${name}, напишите "готово" после подписки — пришлю материалы`);
-        }
-      }
-    }, 60 * 60 * 1000) : null;
-    userState.set(key, { ...state, commentReplied: true, followUpTimer: timer });
-  }
-}
-
-async function handleFollow(account, userId) {
-  const key = stateKey(account.id, userId);
-  const state = userState.get(key) || {};
-  userState.set(key, { ...state, isFollower: true });
-  log("follow", `@${account.username}`, `Новый подписчик ${userId}`);
-  if (state.commentReplied && !state.linkSent && account.link) {
-    const name = await getUserName(account.token, userId);
-    await sendDM(account.token, account.pageId, userId, `${name}, вот ваша ссылка:\n\n${account.link}`);
-    if (state.followUpTimer) clearTimeout(state.followUpTimer);
-    userState.set(key, { ...userState.get(key), linkSent: true });
-    log("link_sent", `@${account.username}`, `Ссылка после подписки → ${userId}`);
-  }
-}
-
-async function handleDM(account, userId, text) {
-  const lower = text.toLowerCase().trim();
-  const key = stateKey(account.id, userId);
-  const state = userState.get(key) || {};
-  if (!["готово", "подписался", "подписалась", "done"].includes(lower) || state.linkSent) return;
-  const isFollower = (userState.get(key) || {}).isFollower;
-  const name = await getUserName(account.token, userId);
-  const link = account.link || "";
-  if (isFollower && link) {
-    await sendDM(account.token, account.pageId, userId, `${name}, вот ваша ссылка:\n\n${link}`);
-    userState.set(key, { ...state, linkSent: true });
-    log("link_sent", `@${account.username}`, `Ссылка по "готово" → ${userId}`);
-  } else if (!isFollower) {
-    await sendDM(account.token, account.pageId, userId,
-      `${name}, пока подписку не вижу — попробуйте через минуту`);
-  }
-}
-
-// ─── AI ПРОКСИ ────────────────────────────────────────────────────────────────
-app.post("/api/ai", async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: { message: "ANTHROPIC_API_KEY не задан в .env" } });
-  try {
-    const response = await axios.post("https://api.anthropic.com/v1/messages", req.body, {
-      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-    });
-    res.json(response.data);
-  } catch (err) {
-    res.status(err.response?.status || 500).json(err.response?.data || { error: { message: err.message } });
-  }
-});
-
-// ─── REST API ─────────────────────────────────────────────────────────────────
-
-app.get("/api/config", (req, res) => {
-  const cfg = loadConfig();
-  const autoRedirectUri = getRedirectUri(req, cfg);
-  res.json({
-    ...cfg,
-    appSecret: cfg.appSecret ? "***" : "",
-    redirectUri: cfg.redirectUri || autoRedirectUri,
-    autoRedirectUri,
-    accounts: cfg.accounts.map(a => ({
-      ...a,
-      token: a.token ? a.token.slice(0, 6) + "..." + a.token.slice(-4) : "",
-    })),
-  });
-});
-
-app.patch("/api/config/settings", (req, res) => {
-  const cfg = loadConfig();
-  const { appId, appSecret, redirectUri, verifyToken } = req.body;
-  if (appId       !== undefined) cfg.appId       = appId;
-  if (appSecret   !== undefined && appSecret !== "***") cfg.appSecret = appSecret;
-  if (redirectUri !== undefined) cfg.redirectUri = redirectUri.replace(/\/auth\/instagram\/?$/, "/auth/callback");
-  if (verifyToken !== undefined) cfg.verifyToken = verifyToken;
-  saveConfig(cfg);
-  res.json({ ok: true });
-});
-
-app.patch("/api/config/account/:id", (req, res) => {
-  const cfg = loadConfig();
-  const a = cfg.accounts.find(x => String(x.id) === req.params.id);
-  if (!a) return res.status(404).json({ error: "Not found" });
-  if (req.body.active !== undefined) a.active = req.body.active;
-  if (req.body.link   !== undefined) a.link   = req.body.link;
-  saveConfig(cfg);
-  res.json({ ok: true });
-});
-
-app.delete("/api/config/account/:id", (req, res) => {
-  const cfg = loadConfig();
-  cfg.accounts = cfg.accounts.filter(a => String(a.id) !== req.params.id);
-  saveConfig(cfg);
-  res.json({ ok: true });
-});
-
-app.post("/api/config/account/:id/refresh", async (req, res) => {
-  const cfg = loadConfig();
-  const a = cfg.accounts.find(x => String(x.id) === req.params.id);
-  if (!a) return res.status(404).json({ error: "Not found" });
-  try {
-    const r = await axios.get("https://graph.facebook.com/v19.0/oauth/access_token", {
-      params: { grant_type: "fb_exchange_token", client_id: cfg.appId, client_secret: cfg.appSecret, fb_exchange_token: a.token },
-    });
-    a.token = r.data.access_token;
-    a.tokenExpiry = new Date(Date.now() + (r.data.expires_in || 5184000) * 1000).toISOString().slice(0, 10);
-    saveConfig(cfg);
-    res.json({ ok: true, expiry: a.tokenExpiry });
-  } catch (err) {
-    res.status(500).json({ error: err.response?.data || err.message });
-  }
-});
-
-app.patch("/api/config/scenarios", (req, res) => {
-  const cfg = loadConfig(); cfg.scenarios = req.body.scenarios; saveConfig(cfg); res.json({ ok: true });
-});
-
-app.patch("/api/config/replies", (req, res) => {
-  const cfg = loadConfig(); cfg.commentReplies = req.body.replies; saveConfig(cfg); res.json({ ok: true });
-});
-
-app.get("/api/logs", (req, res) => res.json(eventLog.slice(0, 100)));
-app.get("/healthz", (req, res) => res.json({ status: "ok", accounts: loadConfig().accounts.length }));
+app.get("/healthz", (req, res) => res.json({ status: "ok" }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  const cfg = loadConfig();
-  console.log(`IG Agent: http://localhost:${PORT}`);
-  console.log(`Webhook:  http://localhost:${PORT}/webhook`);
-  console.log(`Verify Token: ${cfg.verifyToken}`);
-});
+app.listen(PORT, () => console.log("IG Agent v3: http://localhost:" + PORT));

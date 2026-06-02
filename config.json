@@ -1,9 +1,5 @@
 {
   "appId": "",
   "appSecret": "",
-  "redirectUri": "",
-  "verifyToken": "",
-  "accounts": [],
-  "scenarios": [],
-  "commentReplies": []
+  "verifyToken": "ig_verify_token"
 }
