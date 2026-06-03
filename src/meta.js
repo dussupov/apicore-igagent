@@ -54,7 +54,23 @@ export async function getPagesWithInstagram(token) {
 
 export async function subscribePageToApp(pageId, pageAccessToken) {
   // Needed for real-time Page/Instagram webhooks. Safe to call multiple times.
-  return graphPost(`/${pageId}/subscribed_apps`, { subscribed_fields: 'feed,messages,messaging_postbacks,messaging_referrals' }, pageAccessToken);
+  // For comment webhooks, the Page must be subscribed to the app.
+  // `feed` is the stable Page field that enables comment/change delivery for Page-connected assets.
+  return graphPost(`/${pageId}/subscribed_apps`, { subscribed_fields: 'feed' }, pageAccessToken);
+}
+
+export async function subscribeInstagramToApp(igUserId, token) {
+  // Some Instagram webhook setups expose the subscription on the IG User node.
+  // If Meta rejects this for the app/account, caller catches and logs the error.
+  return graphPost(`/${igUserId}/subscribed_apps`, { subscribed_fields: 'comments,mentions' }, token);
+}
+
+export async function getPageSubscriptions(pageId, pageAccessToken) {
+  return graphGet(`/${pageId}/subscribed_apps`, { fields: 'id,name,subscribed_fields' }, pageAccessToken);
+}
+
+export async function getInstagramSubscriptions(igUserId, token) {
+  return graphGet(`/${igUserId}/subscribed_apps`, { fields: 'id,name,subscribed_fields' }, token);
 }
 
 export async function replyToComment(commentId, message, token) {

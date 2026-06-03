@@ -3,7 +3,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
-import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram, subscribePageToApp } from './meta.js';
+import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram, subscribePageToApp, subscribeInstagramToApp, getPageSubscriptions, getInstagramSubscriptions } from './meta.js';
 import { processCommentEvent, processMessageEvent, debugMatchComment } from './automation.js';
 
 const app = express();
@@ -139,7 +139,7 @@ app.get('/auth/meta/start', requireAuth, async (req,res)=>{
     if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
     const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-    const oauthScopes = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','business_management'];
+    const oauthScopes = ['pages_show_list','pages_read_engagement','pages_manage_metadata','instagram_basic','instagram_manage_comments','business_management'];
     // IMPORTANT: do not request pages_messaging here. Meta rejects it for this OAuth flow.
     const scope = oauthScopes.join(',');
     const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
@@ -178,11 +178,28 @@ app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
       ]));
     }
     for (const p of pages) {
-      try { await subscribePageToApp(p.id, p.access_token || longToken.access_token); } catch (subErr) { console.warn('[PAGE_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr); }
+      const pageToken = p.access_token || longToken.access_token;
+      const igId = p.instagram_business_account.id;
+      const subscribeResults = [];
+      try {
+        subscribeResults.push({ target: 'page', ok: true, response: await subscribePageToApp(p.id, pageToken) });
+      } catch (subErr) {
+        subscribeResults.push({ target: 'page', ok: false, error: subErr?.response?.data || subErr.message || String(subErr) });
+        console.warn('[PAGE_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr);
+      }
+      try {
+        subscribeResults.push({ target: 'instagram', ok: true, response: await subscribeInstagramToApp(igId, pageToken) });
+      } catch (subErr) {
+        subscribeResults.push({ target: 'instagram', ok: false, error: subErr?.response?.data || subErr.message || String(subErr) });
+        console.warn('[IG_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr);
+      }
       await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
         VALUES($1,$2,$3,$4,$5,NOW() + INTERVAL '55 days',NOW())
         ON CONFLICT(ig_user_id) DO UPDATE SET username=EXCLUDED.username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,access_token=EXCLUDED.access_token,token_expires_at=EXCLUDED.token_expires_at,updated_at=NOW()`,
-        [p.instagram_business_account.id, p.instagram_business_account.username, p.id, p.name, p.access_token || longToken.access_token]);
+        [igId, p.instagram_business_account.username, p.id, p.name, pageToken]);
+      await query(`INSERT INTO automation_logs(event_type,ig_user_id,ig_username,status,error,raw_event)
+                   VALUES('account_connect',$1,$2,'subscription_attempt',$3,$4)`,
+        [igId, p.instagram_business_account.username, subscribeResults.some(x => x.ok) ? null : 'all_subscription_attempts_failed', { page_id: p.id, page_name: p.name, subscribeResults }]);
     }
     res.redirect('/?connected=1');
   } catch(e) {
@@ -207,7 +224,8 @@ app.get('/api/meta/debug', requireAuth, async (req,res)=>{
     hasAppId: Boolean(cfg.appId),
     hasAppSecret: Boolean(cfg.appSecret),
     graphVersion: cfg.graphVersion,
-    dryRun: cfg.dryRun
+    dryRun: cfg.dryRun,
+    oauthScopes: ['pages_show_list','pages_read_engagement','pages_manage_metadata','instagram_basic','instagram_manage_comments','business_management']
   });
 });
 
@@ -218,6 +236,38 @@ app.get('/api/accounts', requireAuth, requireDb, async (req,res)=>{
 app.post('/api/accounts/:id/toggle', requireAuth, requireDb, async (req,res)=>{
   await query('UPDATE instagram_accounts SET is_active=NOT is_active, updated_at=NOW() WHERE id=$1',[req.params.id]); res.json({ok:true});
 });
+
+app.post('/api/accounts/:id/subscribe-webhooks', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const { rows } = await query('SELECT * FROM instagram_accounts WHERE id=$1', [req.params.id]);
+  const account = rows[0];
+  if (!account) return res.status(404).json({ ok:false, error:'account_not_found' });
+  const results = [];
+  try {
+    results.push({ target:'page', ok:true, response: await subscribePageToApp(account.page_id, account.access_token) });
+  } catch (e) {
+    results.push({ target:'page', ok:false, error:e?.response?.data || e.message || String(e) });
+  }
+  try {
+    results.push({ target:'instagram', ok:true, response: await subscribeInstagramToApp(account.ig_user_id, account.access_token) });
+  } catch (e) {
+    results.push({ target:'instagram', ok:false, error:e?.response?.data || e.message || String(e) });
+  }
+  await query(`INSERT INTO automation_logs(account_id,event_type,status,error,raw_event) VALUES($1,'account_subscribe','subscription_attempt',$2,$3)`,
+    [account.id, results.some(x=>x.ok) ? null : 'all_subscription_attempts_failed', { account: { username: account.username, page_id: account.page_id, ig_user_id: account.ig_user_id }, results }]);
+  res.json({ ok: results.some(x=>x.ok), account: { id: account.id, username: account.username, pageId: account.page_id, igUserId: account.ig_user_id }, results });
+}));
+
+app.get('/api/accounts/debug', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const { rows } = await query('SELECT * FROM instagram_accounts ORDER BY id DESC');
+  const accounts = [];
+  for (const a of rows) {
+    const item = { id:a.id, username:a.username, active:a.is_active, igUserId:a.ig_user_id, pageId:a.page_id, pageName:a.page_name, tokenExpiresAt:a.token_expires_at, pageSubscriptions:null, instagramSubscriptions:null };
+    try { item.pageSubscriptions = await getPageSubscriptions(a.page_id, a.access_token); } catch(e) { item.pageSubscriptions = { ok:false, error:e?.response?.data || e.message || String(e) }; }
+    try { item.instagramSubscriptions = await getInstagramSubscriptions(a.ig_user_id, a.access_token); } catch(e) { item.instagramSubscriptions = { ok:false, error:e?.response?.data || e.message || String(e) }; }
+    accounts.push(item);
+  }
+  res.json({ accounts });
+}));
 
 app.get('/api/rules', requireAuth, requireDb, async (req,res)=>{
   const { rows } = await query(`SELECT r.*, a.username account_username FROM automation_rules r JOIN instagram_accounts a ON a.id=r.account_id ORDER BY r.id DESC`);

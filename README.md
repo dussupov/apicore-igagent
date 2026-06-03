@@ -136,3 +136,23 @@ After deploy open:
 If real Instagram comments do not create rows in `/api/webhook/events`, Meta is not delivering the webhook to this service. Check Meta App → Webhooks → Instagram, app mode/roles, Page subscription, and that comments are on the connected Instagram professional account.
 
 If `/api/webhook/events` has rows but `/api/logs` does not show `sent` or `error`, send the latest event JSON/log error for matching/API debugging.
+
+## Fix: real Instagram comments do not arrive
+
+This build adds Page/Instagram webhook subscription helpers:
+
+- OAuth now requests `pages_manage_metadata` so the app can subscribe the connected Page to webhooks.
+- On Instagram connect, the app calls:
+  - `POST /{PAGE_ID}/subscribed_apps`
+  - best-effort `POST /{IG_USER_ID}/subscribed_apps`
+- Accounts screen has a **Подписать Webhooks** button for manual retry.
+- Diagnostics:
+  - `/api/accounts/debug` shows connected accounts and subscription checks.
+  - `/api/webhook/events` shows every POST Meta delivered.
+
+After deploy:
+
+1. Click **Подключить Instagram** again to grant `pages_manage_metadata`.
+2. Open **Аккаунты** and click **Подписать Webhooks** for `@kassymov_a_r`.
+3. Test a real comment from the tester account.
+4. Check `/api/webhook/events` and platform logs.
