@@ -124,14 +124,14 @@ export async function processCommentEvent(changeOrEvent, options = {}) {
   try {
     if (!ok) throw new Error('Rate limit exceeded for this account/minute');
     if (!commentId) throw new Error('No comment id in webhook event');
-    if (!account.page_id && selected.use_private_reply) throw new Error('No Facebook page_id saved for this Instagram account. Reconnect Instagram via Meta OAuth.');
+    if (!account.ig_user_id && selected.use_private_reply) throw new Error('No Instagram ig_user_id saved for this account. Reconnect Instagram via Meta OAuth.');
 
     if (!simulate) {
       if (selected.use_public_reply && publicReply) {
         apiResponses.publicReply = await replyToComment(commentId, publicReply, account.access_token || selected.access_token);
       }
       if (selected.use_private_reply && dmText) {
-        apiResponses.privateReply = await privateReply(account.page_id, commentId, dmText, account.access_token || selected.access_token);
+        apiResponses.privateReply = await privateReply(account.ig_user_id, commentId, dmText, account.access_token || selected.access_token);
       }
       status = 'sent';
     }
@@ -145,7 +145,7 @@ export async function processCommentEvent(changeOrEvent, options = {}) {
      VALUES($1,$2,'comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, event: changeOrEvent }]
   );
-  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses }; 
+  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, igUserId: account.ig_user_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses }; 
 }
 
 export async function debugMatchComment(text = 'ремонт') {

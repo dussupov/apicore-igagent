@@ -8,12 +8,14 @@
 - Реальный webhook `/webhook/meta` отвечает только на настоящие Instagram comment id.
 - Private Reply отправляется через официальный Page messages endpoint: `/{PAGE_ID}/messages` с `recipient.comment_id`.
 - Public reply отправляется через `/{COMMENT_ID}/replies`.
-- В OAuth scope добавлен `pages_messaging`, нужный для private replies.
+- OAuth больше не запрашивает invalid scope `pages_messaging`.
+- Для публичных ответов используется `instagram_manage_comments`.
+- Для private reply используется Instagram messages edge и permission `instagram_manage_messages`; если Meta не выдала это разрешение, публичный ответ всё равно работает, а private reply попадёт в лог как ошибка.
 - В логах сохраняются `apiResponses`, `commentId`, `pageId`, причина ошибок и выбранные тексты.
 
 ## Важное
 
-После деплоя нужно заново нажать «Подключить Instagram», потому что OAuth теперь запрашивает дополнительное разрешение `pages_messaging`.
+После деплоя нужно заново нажать «Подключить Instagram», чтобы токен был выдан без invalid scope `pages_messaging` и с актуальными Instagram permissions.
 
 ## Render переменные
 
@@ -65,3 +67,39 @@ messages
 ## Почему debug больше не отправляет в Instagram
 
 Meta принимает ответы только на реальные comment id из webhook. Fake id вида `test_...` всегда будет давать ошибку `Object with ID does not exist`. Поэтому тестовая кнопка теперь проверяет только matching и формирует статус `simulation_ok`.
+
+## Webhook diagnostics
+
+Open:
+
+```text
+https://YOUR_RENDER_DOMAIN/api/webhook/debug
+```
+
+Copy `webhookUrl` into Meta Webhooks callback URL.
+Use the exact same `META_WEBHOOK_VERIFY_TOKEN` in both places:
+
+- App dashboard → Secrets / Settings → `META_WEBHOOK_VERIFY_TOKEN`
+- Meta for Developers → Webhooks → Instagram → Verify token
+
+Opening `/webhook/meta` directly in a browser now returns diagnostic JSON. Meta verification still works only when Meta sends `hub.mode=subscribe`, `hub.verify_token`, and `hub.challenge`.
+
+For Instagram comment automation, subscribe Webhooks to Instagram fields:
+
+```text
+comments
+mentions
+```
+
+If `/api/debug/match?text=...` returns `matched: true`, but real comments do not appear in Logs, the issue is Meta webhook subscription, not the rule matcher.
+
+
+## OAuth scopes
+
+В этой версии `pages_messaging` полностью удалён из OAuth. Проверка после деплоя:
+
+```
+https://YOUR_DOMAIN/api/meta/debug
+```
+
+В поле `oauthScopes` не должно быть `pages_messaging`. Если Meta всё ещё показывает `Invalid Scopes: pages_messaging`, значит на Render задеплоена старая сборка или браузер открыл старый URL. Сделай Manual Deploy -> Clear build cache & deploy.

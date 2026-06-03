@@ -139,7 +139,9 @@ app.get('/auth/meta/start', requireAuth, async (req,res)=>{
     if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
     const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-    const scope = ['pages_show_list','pages_read_engagement','pages_messaging','instagram_basic','instagram_manage_comments','instagram_manage_messages','business_management'].join(',');
+    const oauthScopes = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_comments','business_management'];
+    // IMPORTANT: do not request pages_messaging here. Meta rejects it for this OAuth flow.
+    const scope = oauthScopes.join(',');
     const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
     res.redirect(url);
   } catch(e) {
@@ -244,8 +246,51 @@ app.get('/api/logs', requireAuth, requireDb, async (req,res)=>{
 
 app.get('/webhook/meta', async (req,res)=>{
   const token = await getSetting('META_WEBHOOK_VERIFY_TOKEN', process.env.META_WEBHOOK_VERIFY_TOKEN || '');
-  if(req.query['hub.mode']==='subscribe' && req.query['hub.verify_token']===token) return res.send(req.query['hub.challenge']);
-  res.sendStatus(403);
+  const mode = req.query['hub.mode'];
+  const verifyToken = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  // Meta verification request. Meta requires returning the raw challenge string.
+  if (mode === 'subscribe') {
+    if (token && verifyToken === token) {
+      console.log('[WEBHOOK_VERIFY_OK]');
+      return res.status(200).send(challenge);
+    }
+    console.warn('[WEBHOOK_VERIFY_FAILED]', { hasConfiguredToken: Boolean(token), receivedToken: verifyToken ? 'present' : 'missing' });
+    return res.status(403).json({
+      ok: false,
+      error: 'verify_token_mismatch',
+      message: 'Webhook verify token from Meta does not match META_WEBHOOK_VERIFY_TOKEN in this app.',
+      configuredTokenPresent: Boolean(token),
+      receivedTokenPresent: Boolean(verifyToken)
+    });
+  }
+
+  // Human/browser diagnostic. This route is not supposed to be opened directly for webhook verification.
+  const baseUrl = publicBaseUrl(req);
+  res.status(200).json({
+    ok: true,
+    endpoint: '/webhook/meta',
+    message: 'Webhook endpoint is online. Meta must call it with hub.mode, hub.verify_token and hub.challenge.',
+    configuredTokenPresent: Boolean(token),
+    callbackUrlForMeta: `${baseUrl}/webhook/meta`,
+    testVerificationUrlExample: `${baseUrl}/webhook/meta?hub.mode=subscribe&hub.verify_token=YOUR_VERIFY_TOKEN&hub.challenge=12345`,
+    note: 'Replace YOUR_VERIFY_TOKEN with the exact value saved in Secrets / Settings and in Meta Webhooks.'
+  });
+});
+
+app.get('/api/webhook/debug', requireAuth, async (req,res)=>{
+  const token = await getSetting('META_WEBHOOK_VERIFY_TOKEN', process.env.META_WEBHOOK_VERIFY_TOKEN || '');
+  const baseUrl = publicBaseUrl(req);
+  res.json({
+    ok: true,
+    webhookUrl: `${baseUrl}/webhook/meta`,
+    verifyTokenConfigured: Boolean(token),
+    verifyTokenMasked: mask(token),
+    verificationTestUrl: `${baseUrl}/webhook/meta?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(token || 'PASTE_VERIFY_TOKEN_HERE')}&hub.challenge=12345`,
+    requiredMetaFields: ['comments','mentions'],
+    message: 'If real Instagram comments do not appear in logs, check Meta App → Webhooks → Instagram subscription and verify token.'
+  });
 });
 app.post('/webhook/meta', async (req,res)=>{
   res.sendStatus(200);
