@@ -58,3 +58,18 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   count INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(account_id, bucket)
 );
+
+
+CREATE TABLE IF NOT EXISTS webhook_audit (
+  id BIGSERIAL PRIMARY KEY,
+  source TEXT NOT NULL DEFAULT 'meta',
+  object_type TEXT,
+  entry_count INTEGER NOT NULL DEFAULT 0,
+  change_fields TEXT[] NOT NULL DEFAULT '{}',
+  messaging_count INTEGER NOT NULL DEFAULT 0,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'received',
+  error TEXT,
+  raw_event JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

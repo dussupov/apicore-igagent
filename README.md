@@ -125,3 +125,14 @@ This build processes webhook events after `received` instead of only logging the
 - Meta API errors are stored in Logs under `Причина/ошибка`.
 
 After deploying, set `DRY_RUN=false`, reconnect Instagram once, and test with a real comment containing an active keyword.
+
+## Webhook delivery diagnostics
+
+After deploy open:
+
+- `/api/webhook/debug` — shows callback URL and verify token status.
+- `/api/webhook/events` — shows every POST received from Meta before any filtering/matching.
+
+If real Instagram comments do not create rows in `/api/webhook/events`, Meta is not delivering the webhook to this service. Check Meta App → Webhooks → Instagram, app mode/roles, Page subscription, and that comments are on the connected Instagram professional account.
+
+If `/api/webhook/events` has rows but `/api/logs` does not show `sent` or `error`, send the latest event JSON/log error for matching/API debugging.

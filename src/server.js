@@ -293,35 +293,75 @@ app.get('/api/webhook/debug', requireAuth, async (req,res)=>{
     message: 'If real Instagram comments do not appear in logs, check Meta App → Webhooks → Instagram subscription and verify token.'
   });
 });
+
+app.get('/api/webhook/events', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const { rows } = await query(`SELECT id, object_type, entry_count, change_fields, messaging_count, processed_count, status, error, created_at
+                                FROM webhook_audit ORDER BY id DESC LIMIT 50`);
+  res.json({ events: rows });
+}));
+
+app.post('/api/webhook/ping', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  await query(`INSERT INTO webhook_audit(object_type,entry_count,change_fields,messaging_count,processed_count,status,raw_event)
+               VALUES('manual_ping',0,'{}',0,0,'received',$1)`, [{ ok: true, at: new Date().toISOString(), body: req.body || {} }]);
+  res.json({ ok: true, message: 'Webhook audit table is writable. This does not test Meta delivery.' });
+}));
+
 app.post('/webhook/meta', async (req,res)=>{
   // Meta needs fast 200 OK. Processing continues async after response.
   res.sendStatus(200);
-  try {
+  const body = req.body || {};
+  setImmediate(async () => {
+    let auditId = null;
     let processed = 0;
-    for (const entry of req.body.entry || []) {
-      for (const change of entry.changes || []) {
-        const field = change.field || '';
-        const value = change.value || {};
-        // Real Instagram comment payloads arrive as changes. Support comments, live_comments and mentions.
-        if (['comments','live_comments','mentions'].includes(field) || value.id || value.comment_id || value.text || value.message || value.comment) {
-          const result = await processCommentEvent({...change, entry_id: entry.id});
-          console.log('[WEBHOOK_CHANGE_PROCESSED]', field, result);
+    const entries = Array.isArray(body.entry) ? body.entry : [];
+    const changeFields = entries.flatMap(entry => (entry.changes || []).map(change => String(change.field || 'unknown')));
+    const messagingCount = entries.reduce((n, entry) => n + ((entry.messaging || []).length), 0);
+    try {
+      if (hasDatabase()) {
+        const audit = await query(
+          `INSERT INTO webhook_audit(object_type,entry_count,change_fields,messaging_count,status,raw_event)
+           VALUES($1,$2,$3,$4,'received',$5) RETURNING id`,
+          [body.object || null, entries.length, changeFields, messagingCount, body]
+        );
+        auditId = audit.rows[0]?.id || null;
+        await query(
+          `INSERT INTO automation_logs(event_type,status,error,raw_event)
+           VALUES('webhook','raw_received',$1,$2)`,
+          [`audit_id=${auditId}; object=${body.object || 'unknown'}; fields=${changeFields.join(',') || 'none'}; messaging=${messagingCount}`, body]
+        );
+      }
+
+      for (const entry of entries) {
+        for (const change of entry.changes || []) {
+          const field = change.field || '';
+          const value = change.value || {};
+          // Real Instagram comment payloads arrive as changes. Support comments, live_comments and mentions.
+          if (['comments','live_comments','mentions'].includes(field) || value.id || value.comment_id || value.text || value.message || value.comment) {
+            const result = await processCommentEvent({...change, entry_id: entry.id});
+            console.log('[WEBHOOK_CHANGE_PROCESSED]', field, result);
+            processed++;
+          }
+        }
+        for (const msg of entry.messaging || []) {
+          const result = await processMessageEvent({...msg, entry_id: entry.id});
+          console.log('[WEBHOOK_MESSAGE_PROCESSED]', result);
           processed++;
         }
       }
-      for (const msg of entry.messaging || []) {
-        // Some Instagram events arrive under messaging. Do not stop at "received"; try to match and reply.
-        const result = await processMessageEvent({...msg, entry_id: entry.id});
-        console.log('[WEBHOOK_MESSAGE_PROCESSED]', result);
-        processed++;
+
+      if (!processed && hasDatabase()) {
+        const bodyText = JSON.stringify(body || {});
+        const reason = bodyText.includes('This is an example') ? 'meta_sample_event_ignored' : 'webhook_received_but_no_comment_payload';
+        await query(`INSERT INTO automation_logs(event_type,status,error,raw_event) VALUES('webhook',$1,$2,$3)`, [reason === 'meta_sample_event_ignored' ? 'ignored' : 'unhandled', reason, body]);
+      }
+      if (auditId && hasDatabase()) await query(`UPDATE webhook_audit SET processed_count=$1,status=$2 WHERE id=$3`, [processed, processed ? 'processed' : 'unhandled', auditId]);
+    } catch(e) {
+      console.error('Webhook processing error', e?.response?.data || e);
+      if (auditId && hasDatabase()) {
+        try { await query(`UPDATE webhook_audit SET status='error', error=$1 WHERE id=$2`, [e?.response?.data ? JSON.stringify(e.response.data) : (e.message || String(e)), auditId]); } catch {}
       }
     }
-    if (!processed && hasDatabase()) {
-      const bodyText = JSON.stringify(req.body || {});
-      if (bodyText.includes('This is an example')) console.log('[WEBHOOK_SAMPLE_POST_IGNORED]');
-      else await query(`INSERT INTO automation_logs(event_type,status,error,raw_event) VALUES('webhook','unhandled','webhook_received_but_no_comment_payload',$1)`, [req.body]);
-    }
-  } catch(e) { console.error('Webhook processing error', e?.response?.data || e); }
+  });
 });
 
 app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
