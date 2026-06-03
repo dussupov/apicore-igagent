@@ -395,6 +395,14 @@ app.get('/api/webhook/events', requireAuth, requireDb, asyncRoute(async (req,res
   res.json({ events: rows });
 }));
 
+
+app.get('/api/webhook/events/:id', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const { rows } = await query(`SELECT id, object_type, entry_count, change_fields, messaging_count, processed_count, status, error, raw_event, created_at
+                                FROM webhook_audit WHERE id=$1 LIMIT 1`, [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'not_found' });
+  res.json(rows[0]);
+}));
+
 app.post('/api/webhook/ping', requireAuth, requireDb, asyncRoute(async (req,res)=>{
   await query(`INSERT INTO webhook_audit(object_type,entry_count,change_fields,messaging_count,processed_count,status,raw_event)
                VALUES('manual_ping',0,'{}',0,0,'received',$1)`, [{ ok: true, at: new Date().toISOString(), body: req.body || {} }]);
@@ -434,6 +442,14 @@ app.post('/webhook/meta', async (req,res)=>{
           if (['comments','live_comments','mentions'].includes(field) || value.id || value.comment_id || value.text || value.message || value.comment) {
             const result = await processCommentEvent({...change, entry_id: entry.id});
             console.log('[WEBHOOK_CHANGE_PROCESSED]', field, result);
+            if (hasDatabase()) {
+              await query(`INSERT INTO automation_logs(event_type,status,error,comment_id,comment_text,raw_event) VALUES('webhook','change_processed',$1,$2,$3,$4)`, [
+                `audit_id=${auditId}; field=${field}; result_status=${result?.status || 'unknown'}; reason=${result?.reason || ''}`,
+                result?.commentId || null,
+                result?.text || '',
+                { auditId, field, result }
+              ]);
+            }
             processed++;
           }
         }

@@ -115,3 +115,9 @@ export async function sendInstagramMessage(igUserId, recipientId, message, token
     message: { text: String(message || '') }
   }, token);
 }
+
+
+export async function getCommentDetails(commentId, token) {
+  if (!commentId) return null;
+  return graphGet(`/${commentId}`, { fields: 'id,text,username,timestamp,media{id},from{id,username}' }, token);
+}

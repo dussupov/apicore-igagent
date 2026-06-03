@@ -109,3 +109,19 @@ messages
 - DM-сообщение;
 - естественные тексты с разным тоном.
 
+
+
+## Важно по кнопке Webhook
+В режиме нового Instagram API платформа не вызывает `/{page_id}/subscribed_apps` и не использует `pages_manage_metadata`. Webhook подключается в Meta → Instagram API → Webhooks. Кнопка в аккаунте только показывает диагностический статус и не делает подписку через API.
+
+## Webhook parser fix
+This build adds robust parsing for Instagram API comment webhook payloads:
+- stores every raw webhook in `webhook_audit`;
+- exposes `/api/webhook/events/:id` to inspect a raw payload;
+- tries to fetch comment details from Graph API when webhook contains only an ID;
+- logs `change_processed`, parser debug, `comment_id`, and text extraction status.
+
+After deploy, test a real comment and check:
+- `/api/webhook/events`
+- `/api/webhook/events/NEW_ID`
+- `/api/logs`

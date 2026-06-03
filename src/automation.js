@@ -1,5 +1,5 @@
 import { query, getSetting } from './db.js';
-import { replyToComment, privateReply, sendInstagramMessage } from './meta.js';
+import { replyToComment, privateReply, sendInstagramMessage, getCommentDetails } from './meta.js';
 
 function normalize(s = '') {
   return String(s)
@@ -57,18 +57,56 @@ async function rateLimitOk(accountId, limit) {
   return rows[0].count <= limit;
 }
 
+function firstNonEmpty(...vals) {
+  for (const v of vals) {
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+  }
+  return null;
+}
+
+function walkObjects(root, limit = 200) {
+  const out = [];
+  const seen = new Set();
+  function walk(x) {
+    if (!x || typeof x !== 'object' || seen.has(x) || out.length > limit) return;
+    seen.add(x);
+    out.push(x);
+    for (const v of Object.values(x)) {
+      if (v && typeof v === 'object') {
+        if (Array.isArray(v)) v.forEach(walk); else walk(v);
+      }
+    }
+  }
+  walk(root);
+  return out;
+}
+
 function extractCommentEvent(changeOrEvent) {
   const value = changeOrEvent?.value || changeOrEvent || {};
   const entryId = changeOrEvent?.entry_id || changeOrEvent?.id || null;
+  const objects = walkObjects(value);
+  const possibleCommentObj = objects.find(o => o.comment && typeof o.comment === 'object')?.comment || {};
+  const textObj = objects.find(o => typeof o.text === 'string' || typeof o.message === 'string') || {};
+  const idObj = objects.find(o => o.comment_id || o.commentId) || objects.find(o => o.id && (o.text || o.message || o.from || o.username)) || value;
+  const mediaObj = objects.find(o => o.media && typeof o.media === 'object')?.media || objects.find(o => o.media_id || o.mediaId || o.post_id || o.media?.id) || {};
+  const fromObj = objects.find(o => o.from && typeof o.from === 'object')?.from || objects.find(o => o.user && typeof o.user === 'object')?.user || objects.find(o => o.username || o.user_id) || {};
+
   return {
     value,
-    commentId: value.id || value.comment_id || value.comment?.id || value.comment?.comment_id || null,
-    mediaId: value.media?.id || value.media_id || value.post_id || null,
-    text: value.text || value.message || value.comment?.text || value.comment?.message || '',
-    from: value.from || value.user || value.sender || {},
-    igBusinessId: value.ig_id || value.owner_id || value.media?.owner?.id || entryId || null,
+    commentId: firstNonEmpty(value.comment_id, value.commentId, possibleCommentObj.id, possibleCommentObj.comment_id, idObj.comment_id, idObj.commentId, (idObj !== value ? idObj.id : null), value.id),
+    mediaId: firstNonEmpty(value.media_id, value.mediaId, value.post_id, value.media?.id, mediaObj.id, mediaObj.media_id, mediaObj.mediaId, mediaObj.post_id),
+    text: firstNonEmpty(value.text, value.message, value.comment?.text, value.comment?.message, possibleCommentObj.text, possibleCommentObj.message, textObj.text, textObj.message) || '',
+    from: value.from || value.user || value.sender || fromObj || {},
+    igBusinessId: firstNonEmpty(value.ig_id, value.owner_id, value.user_id, value.recipient?.id, value.media?.owner?.id, entryId),
+    parserDebug: {
+      topKeys: Object.keys(value || {}),
+      objectCount: objects.length,
+      textFound: Boolean(firstNonEmpty(value.text, value.message, value.comment?.text, value.comment?.message, possibleCommentObj.text, possibleCommentObj.message, textObj.text, textObj.message)),
+      idFound: Boolean(firstNonEmpty(value.comment_id, value.commentId, possibleCommentObj.id, possibleCommentObj.comment_id, idObj.comment_id, idObj.commentId, idObj.id, value.id))
+    }
   };
 }
+
 
 function extractMessageEvent(msg) {
   const message = msg?.message || {};
@@ -118,16 +156,35 @@ async function logIgnored(reason, event, data = {}) {
 
 export async function processCommentEvent(changeOrEvent, options = {}) {
   const e = extractCommentEvent(changeOrEvent);
-  const { commentId, mediaId, text, from } = e;
+  let { commentId, mediaId, text, from } = e;
   const simulate = Boolean(options.simulate);
 
   if (!simulate && isMetaSampleEvent(changeOrEvent, e)) {
     console.log('[WEBHOOK_SAMPLE_IGNORED]', { text, commentId });
+    await query(`INSERT INTO automation_logs(event_type,status,error,comment_id,comment_text,raw_event) VALUES('comment','ignored','meta_sample_event_ignored',$1,$2,$3)`, [commentId || null, text || '', { event: changeOrEvent, parserDebug: e.parserDebug }]);
     return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored', sample: true };
   }
-  if (!text || !normalize(text)) return logIgnored('empty_comment_text', changeOrEvent);
 
   const { accounts, rules } = await loadEnabledRules();
+
+  // Some real Instagram API webhook payloads contain only an object/comment ID.
+  // In that case fetch the comment details before keyword matching.
+  if ((!text || !normalize(text)) && commentId && accounts.length) {
+    const tokenAccount = accounts.find(a => a.is_active) || accounts[0];
+    try {
+      const details = await getCommentDetails(commentId, tokenAccount.access_token);
+      if (details) {
+        text = firstNonEmpty(details.text, details.message, text) || '';
+        mediaId = firstNonEmpty(mediaId, details.media?.id, details.media_id);
+        from = details.from || (details.username ? { username: details.username } : from);
+      }
+    } catch (err) {
+      await query(`INSERT INTO automation_logs(event_type,status,error,comment_id,comment_text,raw_event) VALUES('comment','received',$1,$2,$3,$4)`, [`comment_details_fetch_failed: ${apiError(err)}`, commentId || null, text || '', { event: changeOrEvent, parserDebug: e.parserDebug }]);
+    }
+  }
+
+  if (!text || !normalize(text)) return logIgnored('empty_comment_text', changeOrEvent, { commentId, parserDebug: e.parserDebug });
+
   if (!accounts.length) return logIgnored('no_active_instagram_accounts', changeOrEvent);
   if (!rules.length) return logIgnored('no_enabled_rules', changeOrEvent, { activeAccounts: accounts.map(a => a.username) });
 
@@ -165,7 +222,7 @@ export async function processCommentEvent(changeOrEvent, options = {}) {
   await query(
     `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,ig_username,media_id,comment_id,comment_text,selected_public_reply,dm_text,status,error,raw_event)
      VALUES($1,$2,'comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, event: changeOrEvent }]
+    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, parserDebug: e.parserDebug, event: changeOrEvent }]
   );
 
   return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, igUserId: account.ig_user_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses };
