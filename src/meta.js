@@ -4,19 +4,32 @@ import { getSetting } from './db.js';
 export async function metaConfig() {
   const graphVersionRaw = await getSetting('META_GRAPH_VERSION', 'v23.0');
   const graphVersion = String(graphVersionRaw || 'v23.0').trim() || 'v23.0';
+  const loginMode = String(await getSetting('META_LOGIN_MODE', 'instagram') || 'instagram').trim();
   return {
-    appId: await getSetting('META_APP_ID'),
-    appSecret: await getSetting('META_APP_SECRET'),
+    appId: await getSetting('META_APP_ID', process.env.META_APP_ID || ''),
+    appSecret: await getSetting('META_APP_SECRET', process.env.META_APP_SECRET || ''),
     graphVersion,
-    baseUrl: await getSetting('APP_BASE_URL'),
-    verifyToken: await getSetting('META_WEBHOOK_VERIFY_TOKEN'),
-    dryRun: String(await getSetting('DRY_RUN', 'true')) === 'true'
+    loginMode,
+    baseUrl: await getSetting('APP_BASE_URL', process.env.APP_BASE_URL || ''),
+    verifyToken: await getSetting('META_WEBHOOK_VERIFY_TOKEN', process.env.META_WEBHOOK_VERIFY_TOKEN || ''),
+    dryRun: String(await getSetting('DRY_RUN', process.env.DRY_RUN || 'true')) === 'true',
+    graphBaseUrl: String(await getSetting('META_GRAPH_BASE_URL', loginMode === 'instagram' ? 'https://graph.instagram.com' : 'https://graph.facebook.com') || '').replace(/\/$/, '') || 'https://graph.instagram.com'
   };
+}
+
+export function instagramBusinessScopes() {
+  // New Instagram API / Instagram Login permissions. No Page permissions here.
+  return ['instagram_business_basic', 'instagram_business_manage_comments', 'instagram_business_manage_messages'];
+}
+
+export function facebookLegacyScopes() {
+  // Fallback for old Facebook Page flow. Kept only for compatibility and not used by default.
+  return ['pages_show_list', 'pages_read_engagement', 'instagram_basic', 'instagram_manage_comments', 'business_management'];
 }
 
 export async function graphGet(path, params = {}, token) {
   const cfg = await metaConfig();
-  const url = `https://graph.facebook.com/${cfg.graphVersion}${path}`;
+  const url = `${cfg.graphBaseUrl}/${cfg.graphVersion}${path}`;
   const { data } = await axios.get(url, { params: { ...params, access_token: token } });
   return data;
 }
@@ -24,12 +37,43 @@ export async function graphGet(path, params = {}, token) {
 export async function graphPost(path, payload = {}, token) {
   const cfg = await metaConfig();
   if (cfg.dryRun) return { dry_run: true, path, payload };
-  const url = `https://graph.facebook.com/${cfg.graphVersion}${path}`;
+  const url = `${cfg.graphBaseUrl}/${cfg.graphVersion}${path}`;
   const { data } = await axios.post(url, payload, { params: { access_token: token } });
   return data;
 }
 
-export async function exchangeCodeForToken(code, redirectUri) {
+export async function exchangeInstagramCodeForToken(code, redirectUri) {
+  const cfg = await metaConfig();
+  const form = new URLSearchParams();
+  form.set('client_id', cfg.appId);
+  form.set('client_secret', cfg.appSecret);
+  form.set('grant_type', 'authorization_code');
+  form.set('redirect_uri', redirectUri);
+  form.set('code', code);
+  const { data } = await axios.post('https://api.instagram.com/oauth/access_token', form, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+  return data;
+}
+
+export async function exchangeInstagramLongLived(shortToken) {
+  const cfg = await metaConfig();
+  const { data } = await axios.get(`https://graph.instagram.com/${cfg.graphVersion}/access_token`, {
+    params: { grant_type: 'ig_exchange_token', client_secret: cfg.appSecret, access_token: shortToken }
+  });
+  return data;
+}
+
+export async function getInstagramMe(token) {
+  try {
+    return await graphGet('/me', { fields: 'id,user_id,username,account_type' }, token);
+  } catch {
+    return await graphGet('/me', { fields: 'id,username' }, token);
+  }
+}
+
+// Legacy Facebook Login helpers. They are not used in the new Instagram mode.
+export async function exchangeFacebookCodeForToken(code, redirectUri) {
   const cfg = await metaConfig();
   const url = `https://graph.facebook.com/${cfg.graphVersion}/oauth/access_token`;
   const { data } = await axios.get(url, {
@@ -38,7 +82,7 @@ export async function exchangeCodeForToken(code, redirectUri) {
   return data;
 }
 
-export async function exchangeLongLived(shortToken) {
+export async function exchangeFacebookLongLived(shortToken) {
   const cfg = await metaConfig();
   const url = `https://graph.facebook.com/${cfg.graphVersion}/oauth/access_token`;
   const { data } = await axios.get(url, {
@@ -48,29 +92,10 @@ export async function exchangeLongLived(shortToken) {
 }
 
 export async function getPagesWithInstagram(token) {
-  const pages = await graphGet('/me/accounts', { fields: 'id,name,access_token,instagram_business_account{id,username}' }, token);
+  const cfg = await metaConfig();
+  const url = `https://graph.facebook.com/${cfg.graphVersion}/me/accounts`;
+  const { data: pages } = await axios.get(url, { params: { fields: 'id,name,access_token,instagram_business_account{id,username}', access_token: token } });
   return (pages.data || []).filter(p => p.instagram_business_account);
-}
-
-export async function subscribePageToApp(pageId, pageAccessToken) {
-  // Needed for real-time Page/Instagram webhooks. Safe to call multiple times.
-  // For comment webhooks, the Page must be subscribed to the app.
-  // `feed` is the stable Page field that enables comment/change delivery for Page-connected assets.
-  return graphPost(`/${pageId}/subscribed_apps`, { subscribed_fields: 'feed' }, pageAccessToken);
-}
-
-export async function subscribeInstagramToApp(igUserId, token) {
-  // Some Instagram webhook setups expose the subscription on the IG User node.
-  // If Meta rejects this for the app/account, caller catches and logs the error.
-  return graphPost(`/${igUserId}/subscribed_apps`, { subscribed_fields: 'comments,mentions' }, token);
-}
-
-export async function getPageSubscriptions(pageId, pageAccessToken) {
-  return graphGet(`/${pageId}/subscribed_apps`, { fields: 'id,name,subscribed_fields' }, pageAccessToken);
-}
-
-export async function getInstagramSubscriptions(igUserId, token) {
-  return graphGet(`/${igUserId}/subscribed_apps`, { fields: 'id,name,subscribed_fields' }, token);
 }
 
 export async function replyToComment(commentId, message, token) {
@@ -78,7 +103,6 @@ export async function replyToComment(commentId, message, token) {
 }
 
 export async function privateReply(igUserId, commentId, message, token) {
-  // Instagram Private Replies: send one DM to the user who commented.
   return graphPost(`/${igUserId}/messages`, {
     recipient: { comment_id: String(commentId) },
     message: { text: String(message || '') }

@@ -3,7 +3,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
-import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram, subscribePageToApp, subscribeInstagramToApp, getPageSubscriptions, getInstagramSubscriptions } from './meta.js';
+import { metaConfig, instagramBusinessScopes, facebookLegacyScopes, exchangeInstagramCodeForToken, exchangeInstagramLongLived, getInstagramMe, exchangeFacebookCodeForToken, exchangeFacebookLongLived, getPagesWithInstagram } from './meta.js';
 import { processCommentEvent, processMessageEvent, debugMatchComment } from './automation.js';
 
 const app = express();
@@ -117,16 +117,20 @@ app.get('/api/dashboard', requireAuth, requireDb, asyncRoute(async (req,res)=>{
 }));
 
 app.get('/api/settings', requireAuth, requireDb, async (req,res)=>{
-  const keys = ['META_APP_ID','META_APP_SECRET','META_GRAPH_VERSION','META_WEBHOOK_VERIFY_TOKEN','APP_BASE_URL','DRY_RUN','DEFAULT_RATE_LIMIT_PER_MINUTE'];
+  const keys = ['META_APP_ID','META_APP_SECRET','META_GRAPH_VERSION','META_LOGIN_MODE','META_GRAPH_BASE_URL','META_WEBHOOK_VERIFY_TOKEN','APP_BASE_URL','DRY_RUN','DEFAULT_RATE_LIMIT_PER_MINUTE','OPENAI_API_KEY'];
   const data = {};
   for (const k of keys) data[k] = await getSetting(k, process.env[k] || '');
   data.META_APP_SECRET_MASKED = mask(data.META_APP_SECRET);
+  data.OPENAI_API_KEY_MASKED = mask(data.OPENAI_API_KEY);
+  data.META_APP_SECRET = '';
+  data.OPENAI_API_KEY = '';
   res.json(data);
 });
 app.post('/api/settings', requireAuth, requireDb, async (req,res)=>{
   const schema = z.object({
     META_APP_ID:z.string().optional(), META_APP_SECRET:z.string().optional(), META_GRAPH_VERSION:z.string().default('v23.0'),
-    META_WEBHOOK_VERIFY_TOKEN:z.string().optional(), APP_BASE_URL:z.string().optional(), DRY_RUN:z.string().default('true'), DEFAULT_RATE_LIMIT_PER_MINUTE:z.string().default('15')
+    META_LOGIN_MODE:z.string().default('instagram'), META_GRAPH_BASE_URL:z.string().optional(),
+    META_WEBHOOK_VERIFY_TOKEN:z.string().optional(), APP_BASE_URL:z.string().optional(), DRY_RUN:z.string().default('true'), DEFAULT_RATE_LIMIT_PER_MINUTE:z.string().default('15'), OPENAI_API_KEY:z.string().optional()
   });
   const data = schema.parse(req.body);
   for (const [k,v] of Object.entries(data)) await setSetting(k, v ?? '');
@@ -139,17 +143,18 @@ app.get('/auth/meta/start', requireAuth, async (req,res)=>{
     if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
     const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-    const oauthScopes = ['pages_show_list','pages_read_engagement','pages_manage_metadata','instagram_basic','instagram_manage_comments','business_management'];
-    // IMPORTANT: do not request pages_messaging here. Meta rejects it for this OAuth flow.
+    const loginMode = String(cfg.loginMode || 'instagram');
+    const oauthScopes = loginMode === 'facebook' ? facebookLegacyScopes() : instagramBusinessScopes();
     const scope = oauthScopes.join(',');
-    const url = `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
+    const authBase = loginMode === 'facebook' ? `https://www.facebook.com/${cfg.graphVersion}/dialog/oauth` : 'https://www.instagram.com/oauth/authorize';
+    const url = `${authBase}?client_id=${encodeURIComponent(cfg.appId)}&redirect_uri=${encodeURIComponent(redirect)}&scope=${encodeURIComponent(scope)}&response_type=code`;
     res.redirect(url);
   } catch(e) {
     console.error('[META_START_ERROR]', e?.response?.data || e);
-    res.status(200).send(htmlError('Ошибка запуска Meta OAuth', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
+    res.status(200).send(htmlError('Ошибка запуска Instagram OAuth', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
       'Проверь META_APP_ID, META_APP_SECRET и APP_BASE_URL.',
       'APP_BASE_URL должен совпадать с доменом Render.',
-      'Проверь /healthz.'
+      'В этой сборке по умолчанию используется Instagram Login без pages_manage_metadata.'
     ]));
   }
 });
@@ -158,57 +163,62 @@ app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
     const ready = await validateMetaReady(req);
     if (!ready.ok) return res.status(200).send(htmlError(ready.title, ready.details, ready.fixes));
     if (req.query.error || !req.query.code) {
-      return res.status(200).send(htmlError('Meta не вернула code', JSON.stringify(req.query,null,2), [
+      return res.status(200).send(htmlError('Instagram не вернул code', JSON.stringify(req.query,null,2), [
         'Проверь Valid OAuth Redirect URI в Meta App.',
         `Добавь точный callback: ${ready.cfg.baseUrl}/auth/meta/callback`,
-        'Проверь, что приложение в Development и твой Facebook-профиль добавлен как Admin/Developer/Tester.'
+        'Проверь, что Instagram Login / Instagram API включён в приложении.'
       ]));
     }
     const cfg = ready.cfg;
     const redirect = `${cfg.baseUrl}/auth/meta/callback`;
-    const shortToken = await exchangeCodeForToken(req.query.code, redirect);
-    const longToken = await exchangeLongLived(shortToken.access_token);
-    const pages = await getPagesWithInstagram(longToken.access_token);
-    if (!pages.length) {
-      return res.status(200).send(htmlError('Instagram аккаунты не найдены', 'Meta OAuth прошёл, но /me/accounts не вернул страниц с instagram_business_account.', [
-        'Instagram должен быть Professional и привязан к Facebook Page.',
-        'Разреши доступ к нужной Facebook Page в окне Meta Login.',
-        'Для Creator может не всё отображаться стабильно — лучше Business аккаунт.',
-        'Проверь permissions: pages_show_list, pages_read_engagement, instagram_basic.'
-      ]));
-    }
-    for (const p of pages) {
-      const pageToken = p.access_token || longToken.access_token;
-      const igId = p.instagram_business_account.id;
-      const subscribeResults = [];
-      try {
-        subscribeResults.push({ target: 'page', ok: true, response: await subscribePageToApp(p.id, pageToken) });
-      } catch (subErr) {
-        subscribeResults.push({ target: 'page', ok: false, error: subErr?.response?.data || subErr.message || String(subErr) });
-        console.warn('[PAGE_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr);
+    const loginMode = String(cfg.loginMode || 'instagram');
+
+    if (loginMode === 'facebook') {
+      const shortToken = await exchangeFacebookCodeForToken(req.query.code, redirect);
+      const longToken = await exchangeFacebookLongLived(shortToken.access_token);
+      const pages = await getPagesWithInstagram(longToken.access_token);
+      if (!pages.length) {
+        return res.status(200).send(htmlError('Instagram аккаунты не найдены', 'Facebook Login прошёл, но /me/accounts не вернул страниц с instagram_business_account.', [
+          'Instagram должен быть Professional и привязан к Facebook Page.',
+          'Разреши доступ к нужной Facebook Page в окне Meta Login.'
+        ]));
       }
-      try {
-        subscribeResults.push({ target: 'instagram', ok: true, response: await subscribeInstagramToApp(igId, pageToken) });
-      } catch (subErr) {
-        subscribeResults.push({ target: 'instagram', ok: false, error: subErr?.response?.data || subErr.message || String(subErr) });
-        console.warn('[IG_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr);
+      for (const p of pages) {
+        const pageToken = p.access_token || longToken.access_token;
+        const igId = p.instagram_business_account.id;
+        await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
+          VALUES($1,$2,$3,$4,$5,NOW() + INTERVAL '55 days',NOW())
+          ON CONFLICT(ig_user_id) DO UPDATE SET username=EXCLUDED.username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,access_token=EXCLUDED.access_token,token_expires_at=EXCLUDED.token_expires_at,updated_at=NOW()`,
+          [igId, p.instagram_business_account.username, p.id, p.name, pageToken]);
+        await query(`INSERT INTO automation_logs(event_type,ig_user_id,ig_username,status,error,raw_event)
+                     VALUES('account_connect',$1,$2,'connected',NULL,$3)`,
+          [igId, p.instagram_business_account.username, { mode:'facebook_legacy', page_id:p.id, page_name:p.name }]);
       }
-      await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
-        VALUES($1,$2,$3,$4,$5,NOW() + INTERVAL '55 days',NOW())
-        ON CONFLICT(ig_user_id) DO UPDATE SET username=EXCLUDED.username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,access_token=EXCLUDED.access_token,token_expires_at=EXCLUDED.token_expires_at,updated_at=NOW()`,
-        [igId, p.instagram_business_account.username, p.id, p.name, pageToken]);
-      await query(`INSERT INTO automation_logs(event_type,ig_user_id,ig_username,status,error,raw_event)
-                   VALUES('account_connect',$1,$2,'subscription_attempt',$3,$4)`,
-        [igId, p.instagram_business_account.username, subscribeResults.some(x => x.ok) ? null : 'all_subscription_attempts_failed', { page_id: p.id, page_name: p.name, subscribeResults }]);
+      return res.redirect('/?connected=1');
     }
+
+    const shortToken = await exchangeInstagramCodeForToken(req.query.code, redirect);
+    const longToken = await exchangeInstagramLongLived(shortToken.access_token);
+    const accessToken = longToken.access_token || shortToken.access_token;
+    const me = await getInstagramMe(accessToken);
+    const igId = String(me.user_id || me.id || shortToken.user_id || '');
+    const username = String(me.username || `instagram_${igId}`);
+    if (!igId) throw new Error('Instagram Login не вернул user_id/id. Ответ: ' + JSON.stringify({ shortToken, me }));
+
+    await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
+      VALUES($1,$2,NULL,'Instagram Login',$3,NOW() + INTERVAL '55 days',NOW())
+      ON CONFLICT(ig_user_id) DO UPDATE SET username=EXCLUDED.username,page_name=EXCLUDED.page_name,access_token=EXCLUDED.access_token,token_expires_at=EXCLUDED.token_expires_at,updated_at=NOW()`,
+      [igId, username, accessToken]);
+    await query(`INSERT INTO automation_logs(event_type,ig_user_id,ig_username,status,error,raw_event)
+                 VALUES('account_connect',$1,$2,'connected',NULL,$3)`,
+      [igId, username, { mode:'instagram_login', me }]);
     res.redirect('/?connected=1');
   } catch(e) {
-    console.error('[META_CALLBACK_ERROR]', e?.response?.data || e);
-    res.status(200).send(htmlError('Meta OAuth error', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
-      'Проверь, что в Meta App добавлен Valid OAuth Redirect URI: APP_BASE_URL/auth/meta/callback.',
-      'Проверь, что APP_BASE_URL в настройках равен текущему домену Render без слэша на конце.',
-      'Проверь, что App Secret правильный.',
-      'Если приложение в Development, подключайся Facebook-профилем, который добавлен в роли приложения.'
+    console.error('[INSTAGRAM_CALLBACK_ERROR]', e?.response?.data || e);
+    res.status(200).send(htmlError('Instagram OAuth error', e?.response?.data ? JSON.stringify(e.response.data,null,2) : (e.message || String(e)), [
+      'Проверь Valid OAuth Redirect URI: APP_BASE_URL/auth/meta/callback.',
+      'Проверь, что META_LOGIN_MODE=instagram.',
+      'Проверь разрешения: instagram_business_basic, instagram_business_manage_comments, instagram_business_manage_messages.'
     ]));
   }
 });
@@ -225,7 +235,9 @@ app.get('/api/meta/debug', requireAuth, async (req,res)=>{
     hasAppSecret: Boolean(cfg.appSecret),
     graphVersion: cfg.graphVersion,
     dryRun: cfg.dryRun,
-    oauthScopes: ['pages_show_list','pages_read_engagement','pages_manage_metadata','instagram_basic','instagram_manage_comments','business_management']
+    loginMode: cfg.loginMode || 'instagram',
+    graphBaseUrl: cfg.graphBaseUrl,
+    oauthScopes: (cfg.loginMode || 'instagram') === 'facebook' ? facebookLegacyScopes() : instagramBusinessScopes()
   });
 });
 
@@ -241,31 +253,24 @@ app.post('/api/accounts/:id/subscribe-webhooks', requireAuth, requireDb, asyncRo
   const { rows } = await query('SELECT * FROM instagram_accounts WHERE id=$1', [req.params.id]);
   const account = rows[0];
   if (!account) return res.status(404).json({ ok:false, error:'account_not_found' });
-  const results = [];
-  try {
-    results.push({ target:'page', ok:true, response: await subscribePageToApp(account.page_id, account.access_token) });
-  } catch (e) {
-    results.push({ target:'page', ok:false, error:e?.response?.data || e.message || String(e) });
-  }
-  try {
-    results.push({ target:'instagram', ok:true, response: await subscribeInstagramToApp(account.ig_user_id, account.access_token) });
-  } catch (e) {
-    results.push({ target:'instagram', ok:false, error:e?.response?.data || e.message || String(e) });
-  }
-  await query(`INSERT INTO automation_logs(account_id,event_type,status,error,raw_event) VALUES($1,'account_subscribe','subscription_attempt',$2,$3)`,
-    [account.id, results.some(x=>x.ok) ? null : 'all_subscription_attempts_failed', { account: { username: account.username, page_id: account.page_id, ig_user_id: account.ig_user_id }, results }]);
-  res.json({ ok: results.some(x=>x.ok), account: { id: account.id, username: account.username, pageId: account.page_id, igUserId: account.ig_user_id }, results });
+  const result = { ok:true, mode:'instagram_login', message:'В новом Instagram API подписка на Webhooks настраивается в Meta → Instagram API → Webhooks. Вызовы /subscribed_apps и pages_manage_metadata не используются.', account:{ id:account.id, username:account.username, igUserId:account.ig_user_id } };
+  await query(`INSERT INTO automation_logs(account_id,event_type,status,error,raw_event) VALUES($1,'account_subscribe','not_required',NULL,$2)`, [account.id, result]);
+  res.json(result);
 }));
 
 app.get('/api/accounts/debug', requireAuth, requireDb, asyncRoute(async (req,res)=>{
   const { rows } = await query('SELECT * FROM instagram_accounts ORDER BY id DESC');
-  const accounts = [];
-  for (const a of rows) {
-    const item = { id:a.id, username:a.username, active:a.is_active, igUserId:a.ig_user_id, pageId:a.page_id, pageName:a.page_name, tokenExpiresAt:a.token_expires_at, pageSubscriptions:null, instagramSubscriptions:null };
-    try { item.pageSubscriptions = await getPageSubscriptions(a.page_id, a.access_token); } catch(e) { item.pageSubscriptions = { ok:false, error:e?.response?.data || e.message || String(e) }; }
-    try { item.instagramSubscriptions = await getInstagramSubscriptions(a.ig_user_id, a.access_token); } catch(e) { item.instagramSubscriptions = { ok:false, error:e?.response?.data || e.message || String(e) }; }
-    accounts.push(item);
-  }
+  const accounts = rows.map(a => ({
+    id:a.id,
+    username:a.username,
+    active:a.is_active,
+    igUserId:a.ig_user_id,
+    pageId:a.page_id,
+    pageName:a.page_name,
+    tokenExpiresAt:a.token_expires_at,
+    mode:a.page_id ? 'facebook_legacy' : 'instagram_login',
+    webhookNote:'Для Instagram Login реальные события должны быть включены в Meta → Instagram API → Webhooks. /subscribed_apps не используется.'
+  }));
   res.json({ accounts });
 }));
 
@@ -289,6 +294,46 @@ app.post('/api/rules', requireAuth, requireDb, async (req,res)=>{
   res.json({ok:true});
 });
 app.delete('/api/rules/:id', requireAuth, requireDb, async (req,res)=>{ await query('DELETE FROM automation_rules WHERE id=$1',[req.params.id]); res.json({ok:true}); });
+
+app.post('/api/ai/generate-replies', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const schema = z.object({
+    topic:z.string().default(''),
+    keyword:z.string().default(''),
+    tone:z.string().default('дружелюбный'),
+    count:z.coerce.number().min(1).max(20).default(8),
+    type:z.enum(['comment','dm','both']).default('both'),
+    url:z.string().optional().default('')
+  });
+  const input = schema.parse(req.body || {});
+  const apiKey = await getSetting('OPENAI_API_KEY', process.env.OPENAI_API_KEY || '');
+  const fallbackComments = [
+    'Отправил подробности в директ 👌',
+    'Сейчас пришлю информацию в личные сообщения 📩',
+    'Спасибо за интерес, написал вам в Direct',
+    'Проверьте сообщения, всё отправил ✅',
+    'Уже отправляю детали в личку 🔥',
+    'Информация будет у вас в Direct через минуту'
+  ];
+  const fallbackDm = `Здравствуйте 👋\n\nСпасибо за интерес${input.topic ? ` к теме: ${input.topic}` : ''}.\n\nВот информация:${input.url ? `\n${input.url}` : '\n[вставьте ссылку]'} `;
+  if (!apiKey) {
+    return res.json({ ok:true, provider:'fallback', commentReplies:fallbackComments.slice(0,input.count), dmMessage:fallbackDm, note:'OPENAI_API_KEY не задан, вернул шаблонные варианты.' });
+  }
+  const prompt = `Ты помогаешь писать естественные автоответы для Instagram.\nТема: ${input.topic || 'не указана'}\nКлючевое слово: ${input.keyword || 'не указано'}\nТон: ${input.tone}\nСсылка: ${input.url || 'нет'}\nНужно вернуть JSON строго такого вида:\n{"commentReplies":["..."],"dmMessage":"..."}\ncommentReplies: ${input.count} коротких вариантов до 90 символов, без ощущения бота, можно 0-1 эмодзи.\ndmMessage: короткое Direct-сообщение 2-5 строк, если есть ссылка — вставь ссылку.\nНе используй агрессивный спам, обещания и капслок.`;
+  try {
+    const { data } = await (await import('axios')).default.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o-mini',
+      temperature: 0.85,
+      messages: [{ role:'system', content:'Отвечай только валидным JSON без markdown.' }, { role:'user', content: prompt }],
+      response_format: { type:'json_object' }
+    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type':'application/json' }, timeout: 30000 });
+    const text = data?.choices?.[0]?.message?.content || '{}';
+    const parsed = JSON.parse(text);
+    res.json({ ok:true, provider:'openai', commentReplies: Array.isArray(parsed.commentReplies) ? parsed.commentReplies : [], dmMessage: String(parsed.dmMessage || '') });
+  } catch(e) {
+    res.json({ ok:false, provider:'fallback', error:e?.response?.data || e.message || String(e), commentReplies:fallbackComments.slice(0,input.count), dmMessage:fallbackDm });
+  }
+}));
+
 
 app.get('/api/logs', requireAuth, requireDb, async (req,res)=>{
   const { rows } = await query(`SELECT l.*, a.username account_username, r.name rule_name FROM automation_logs l LEFT JOIN instagram_accounts a ON a.id=l.account_id LEFT JOIN automation_rules r ON r.id=l.rule_id ORDER BY l.id DESC LIMIT 200`);
