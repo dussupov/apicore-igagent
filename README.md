@@ -125,3 +125,18 @@ After deploy, test a real comment and check:
 - `/api/webhook/events`
 - `/api/webhook/events/NEW_ID`
 - `/api/logs`
+
+
+## Direct messages: important
+
+If logs show `message_edit_ignored_enable_messages_webhook`, Meta sent only a message edit/update event.
+That payload does not include `sender.id` or `message.text`, so the bot cannot match keywords or reply.
+
+In Meta Developers → Instagram API → Webhooks, subscribe to real message events (`messages`) in addition to comments/mentions.
+A real inbound DM payload must contain something like:
+
+```json
+{ "messaging": [{ "sender": { "id": "..." }, "recipient": { "id": "..." }, "message": { "mid": "...", "text": "апикор" } }] }
+```
+
+Payloads with only `message_edit.mid` are now ignored and logged as diagnostic events.

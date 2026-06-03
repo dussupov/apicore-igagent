@@ -281,30 +281,38 @@ export async function processMessageEvent(msg, options = {}) {
   const simulate = Boolean(options.simulate);
   if (isMetaSampleEvent(msg, e)) return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored' };
 
-  // message_edit events often contain only { message_edit: { mid } } and no text/sender.
-  // Try to hydrate the message by mid using the connected account token. If Meta does not allow it,
-  // log a precise non-fatal status instead of treating it as an automation failure.
-  if ((!e.text || !normalize(e.text)) && e.messageId && e.eventKind === 'message_edit') {
-    try {
-      const { accounts } = await loadEnabledRules();
-      const account = accounts.find(a => String(a.ig_user_id || '') === String(e.recipientId || '')) || accounts[0];
-      if (account?.access_token) {
-        const details = await getMessageDetails(e.messageId, account.access_token);
-        e.text = firstNonEmpty(details?.text, details?.message, details?.body, e.text) || '';
-        e.senderId = firstNonEmpty(e.senderId, details?.from?.id, details?.sender?.id);
-        e.recipientId = firstNonEmpty(e.recipientId, details?.to?.data?.[0]?.id, details?.to?.id, account.ig_user_id);
-        e.parserDebug.hydratedMessage = Boolean(e.text);
-        e.parserDebug.hydratedKeys = Object.keys(details || {});
+  // message_edit is NOT a new inbound DM. It usually contains only { message_edit: { mid } }
+  // and often has no sender, recipient, or text. Treat it as a non-actionable event so it
+  // does not look like a failed automation. Real auto-replies require a webhook payload with
+  // messaging[].message.text and sender.id.
+  if (e.eventKind === 'message_edit') {
+    if ((!e.text || !normalize(e.text)) && e.messageId) {
+      try {
+        const { accounts } = await loadEnabledRules();
+        const account = accounts.find(a => String(a.ig_user_id || '') === String(e.recipientId || '')) || accounts[0];
+        if (account?.access_token) {
+          const details = await getMessageDetails(e.messageId, account.access_token);
+          e.text = firstNonEmpty(details?.text, details?.message, details?.body, e.text) || '';
+          e.senderId = firstNonEmpty(e.senderId, details?.from?.id, details?.sender?.id);
+          e.recipientId = firstNonEmpty(e.recipientId, details?.to?.data?.[0]?.id, details?.to?.id, account.ig_user_id);
+          e.parserDebug.hydratedMessage = Boolean(e.text);
+          e.parserDebug.hydratedKeys = Object.keys(details || {});
+        }
+      } catch (err) {
+        e.parserDebug.hydrateError = apiError(err);
       }
-    } catch (err) {
-      e.parserDebug.hydrateError = apiError(err);
+    }
+    if (!e.text || !normalize(e.text) || !e.senderId) {
+      const reason = 'message_edit_ignored_enable_messages_webhook';
+      await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','ignored',$1,$2,$3,$4)`, [reason, e.text || '', e.senderId, { msg, parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, fix: 'In Meta Webhooks subscribe to real Instagram messages, not only message_edit/message_edits events.' }]);
+      return { matched: false, status: 'ignored', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, parserDebug: e.parserDebug };
     }
   }
 
   if (!e.text || !normalize(e.text)) {
-    const reason = e.eventKind === 'message_edit' ? 'message_edit_without_fetchable_text' : `message_without_text:${e.eventKind || 'unknown'}`;
-    await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received',$1,$2,$3,$4)`, [reason, e.text || '', e.senderId, { msg, parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind }]);
-    return { matched: false, status: 'received', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, parserDebug: e.parserDebug };
+    const reason = `message_without_text:${e.eventKind || 'unknown'}`;
+    await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','ignored',$1,$2,$3,$4)`, [reason, e.text || '', e.senderId, { msg, parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind }]);
+    return { matched: false, status: 'ignored', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, parserDebug: e.parserDebug };
   }
 
   // Log visible inbound text before matching so it is obvious that Direct parsing works.

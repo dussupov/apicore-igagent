@@ -396,8 +396,9 @@ app.get('/api/webhook/debug', requireAuth, async (req,res)=>{
     verifyTokenConfigured: Boolean(token),
     verifyTokenMasked: mask(token),
     verificationTestUrl: `${baseUrl}/webhook/meta?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(token || 'PASTE_VERIFY_TOKEN_HERE')}&hub.challenge=12345`,
-    requiredMetaFields: ['comments','mentions'],
-    message: 'If real Instagram comments do not appear in logs, check Meta App → Webhooks → Instagram subscription and verify token.'
+    requiredMetaFields: ['comments','mentions','messages'],
+    dmRequiredPayload: 'For Direct auto-replies the raw event must contain entry[].messaging[].sender.id and entry[].messaging[].message.text. message_edit alone is not enough.',
+    message: 'If real Instagram comments or DMs do not appear in logs, check Meta App → Webhooks → Instagram subscription and verify token. For DMs, subscribe to real messages, not only message_edit/message_edits.'
   });
 });
 
