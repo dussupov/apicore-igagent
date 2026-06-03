@@ -2,3 +2,5 @@
 
 .banner{background:#3a2608;border:1px solid #76551a;color:#ffdca0;border-radius:16px;padding:14px 18px;margin-bottom:18px}
 .mini{margin:12px 0;background:#0c142b}.mini h3{margin:0 0 10px}.banner{background:#3b2508;border:1px solid #8a5a15;color:#ffe7b0;border-radius:14px;padding:14px;margin-bottom:16px}
+button.danger{background:#7f1d1d;border-color:#ef4444;color:#fff}
+button.danger:hover{background:#991b1b}

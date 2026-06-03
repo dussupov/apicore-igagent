@@ -249,6 +249,18 @@ app.post('/api/accounts/:id/toggle', requireAuth, requireDb, async (req,res)=>{
   await query('UPDATE instagram_accounts SET is_active=NOT is_active, updated_at=NOW() WHERE id=$1',[req.params.id]); res.json({ok:true});
 });
 
+app.delete('/api/accounts/:id', requireAuth, requireDb, asyncRoute(async (req,res)=>{
+  const { rows } = await query('SELECT id, username FROM instagram_accounts WHERE id=$1', [req.params.id]);
+  const account = rows[0];
+  if (!account) return res.status(404).json({ ok:false, error:'account_not_found' });
+
+  // Rules are removed by ON DELETE CASCADE. Logs are removed explicitly so the deleted account disappears from the UI completely.
+  await query('DELETE FROM automation_logs WHERE account_id=$1', [req.params.id]);
+  await query('DELETE FROM rate_limits WHERE account_id=$1', [req.params.id]);
+  await query('DELETE FROM instagram_accounts WHERE id=$1', [req.params.id]);
+  res.json({ ok:true, deletedAccount: account });
+}));
+
 app.post('/api/accounts/:id/subscribe-webhooks', requireAuth, requireDb, asyncRoute(async (req,res)=>{
   const { rows } = await query('SELECT * FROM instagram_accounts WHERE id=$1', [req.params.id]);
   const account = rows[0];
