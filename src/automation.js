@@ -1,5 +1,5 @@
 import { query, getSetting } from './db.js';
-import { replyToComment, privateReply, sendInstagramMessage, getCommentDetails } from './meta.js';
+import { replyToComment, privateReply, sendInstagramMessage, getCommentDetails, getMessageDetails } from './meta.js';
 
 function normalize(s = '') {
   return String(s)
@@ -110,6 +110,7 @@ function extractCommentEvent(changeOrEvent) {
 
 function extractMessageEvent(msg) {
   const message = msg?.message || msg?.messages?.[0] || {};
+  const messageEdit = msg?.message_edit || message?.message_edit || null;
   const postback = msg?.postback || message?.postback || {};
   const referral = msg?.referral || message?.referral || postback?.referral || {};
   const quickReply = message?.quick_reply || msg?.quick_reply || {};
@@ -127,6 +128,8 @@ function extractMessageEvent(msg) {
     msg.text,
     msg.message_text,
     msg.body,
+    msg?.text_data?.text,
+    msg?.message_data?.text,
     quickReply.payload,
     quickReply.text,
     postback.payload,
@@ -138,7 +141,8 @@ function extractMessageEvent(msg) {
   const text = firstNonEmpty(...textCandidates) || '';
 
   let eventKind = 'message';
-  if (read) eventKind = 'read';
+  if (messageEdit?.mid) eventKind = 'message_edit';
+  else if (read) eventKind = 'read';
   else if (delivery) eventKind = 'delivery';
   else if (reaction?.mid || reaction?.emoji) eventKind = 'reaction';
   else if (postback?.payload || postback?.title) eventKind = 'postback';
@@ -147,8 +151,8 @@ function extractMessageEvent(msg) {
 
   return {
     senderId: msg?.sender?.id || msg?.from?.id || msg?.user?.id || null,
-    recipientId: msg?.recipient?.id || msg?.to?.id || null,
-    messageId: message.mid || message.id || msg?.message_id || null,
+    recipientId: msg?.recipient?.id || msg?.to?.id || msg?.entry_id || null,
+    messageId: message.mid || message.id || msg?.message_id || messageEdit?.mid || null,
     text,
     eventKind,
     attachments,
@@ -158,7 +162,8 @@ function extractMessageEvent(msg) {
       topKeys: Object.keys(msg || {}),
       messageKeys: Object.keys(message || {}),
       hasText: Boolean(text),
-      eventKind
+      eventKind,
+      hasMessageEdit: Boolean(messageEdit?.mid)
     }
   };
 }
@@ -275,10 +280,31 @@ export async function processMessageEvent(msg, options = {}) {
   const e = extractMessageEvent(msg);
   const simulate = Boolean(options.simulate);
   if (isMetaSampleEvent(msg, e)) return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored' };
+
+  // message_edit events often contain only { message_edit: { mid } } and no text/sender.
+  // Try to hydrate the message by mid using the connected account token. If Meta does not allow it,
+  // log a precise non-fatal status instead of treating it as an automation failure.
+  if ((!e.text || !normalize(e.text)) && e.messageId && e.eventKind === 'message_edit') {
+    try {
+      const { accounts } = await loadEnabledRules();
+      const account = accounts.find(a => String(a.ig_user_id || '') === String(e.recipientId || '')) || accounts[0];
+      if (account?.access_token) {
+        const details = await getMessageDetails(e.messageId, account.access_token);
+        e.text = firstNonEmpty(details?.text, details?.message, details?.body, e.text) || '';
+        e.senderId = firstNonEmpty(e.senderId, details?.from?.id, details?.sender?.id);
+        e.recipientId = firstNonEmpty(e.recipientId, details?.to?.data?.[0]?.id, details?.to?.id, account.ig_user_id);
+        e.parserDebug.hydratedMessage = Boolean(e.text);
+        e.parserDebug.hydratedKeys = Object.keys(details || {});
+      }
+    } catch (err) {
+      e.parserDebug.hydrateError = apiError(err);
+    }
+  }
+
   if (!e.text || !normalize(e.text)) {
-    const reason = `message_without_text:${e.eventKind || 'unknown'}`;
+    const reason = e.eventKind === 'message_edit' ? 'message_edit_without_fetchable_text' : `message_without_text:${e.eventKind || 'unknown'}`;
     await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received',$1,$2,$3,$4)`, [reason, e.text || '', e.senderId, { msg, parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind }]);
-    return { matched: false, status: 'received', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind };
+    return { matched: false, status: 'received', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, parserDebug: e.parserDebug };
   }
 
   // Log visible inbound text before matching so it is obvious that Direct parsing works.

@@ -121,3 +121,16 @@ export async function getCommentDetails(commentId, token) {
   if (!commentId) return null;
   return graphGet(`/${commentId}`, { fields: 'id,text,username,timestamp,media{id},from{id,username}' }, token);
 }
+
+
+export async function getMessageDetails(messageId, token) {
+  if (!messageId) return null;
+  // Instagram may send message_edit / delivery events with only a mid.
+  // Try the common Graph fields; if Meta denies the lookup, the caller will log the exact error.
+  try {
+    return await graphGet(`/${messageId}`, { fields: 'id,mid,text,message,from,to,created_time' }, token);
+  } catch (err) {
+    try { return await graphGet(`/${messageId}`, { fields: 'id,text,from,to' }, token); }
+    catch { throw err; }
+  }
+}
