@@ -109,14 +109,57 @@ function extractCommentEvent(changeOrEvent) {
 
 
 function extractMessageEvent(msg) {
-  const message = msg?.message || {};
-  const referral = msg?.referral || message?.referral || {};
+  const message = msg?.message || msg?.messages?.[0] || {};
+  const postback = msg?.postback || message?.postback || {};
+  const referral = msg?.referral || message?.referral || postback?.referral || {};
+  const quickReply = message?.quick_reply || msg?.quick_reply || {};
+  const reaction = msg?.reaction || message?.reaction || {};
+  const read = msg?.read || null;
+  const delivery = msg?.delivery || null;
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : (Array.isArray(msg?.attachments) ? msg.attachments : []);
+
+  // Instagram/Messenger webhooks have several shapes depending on event type and API mode.
+  // We deliberately collect many candidates instead of assuming only message.text.
+  const textCandidates = [
+    message.text,
+    message.message,
+    message.body,
+    msg.text,
+    msg.message_text,
+    msg.body,
+    quickReply.payload,
+    quickReply.text,
+    postback.payload,
+    postback.title,
+    referral.ref,
+    referral.source,
+    reaction.emoji
+  ];
+  const text = firstNonEmpty(...textCandidates) || '';
+
+  let eventKind = 'message';
+  if (read) eventKind = 'read';
+  else if (delivery) eventKind = 'delivery';
+  else if (reaction?.mid || reaction?.emoji) eventKind = 'reaction';
+  else if (postback?.payload || postback?.title) eventKind = 'postback';
+  else if (attachments.length) eventKind = `attachment:${attachments.map(a => a.type || 'unknown').join(',')}`;
+  else if (!text) eventKind = 'message_without_text';
+
   return {
-    senderId: msg?.sender?.id || msg?.from?.id || null,
-    recipientId: msg?.recipient?.id || null,
-    text: message.text || msg?.text || msg?.postback?.payload || msg?.postback?.title || referral.ref || '',
-    commentId: referral.comment_id || referral.comment?.id || message?.reply_to?.comment_id || null,
-    raw: msg
+    senderId: msg?.sender?.id || msg?.from?.id || msg?.user?.id || null,
+    recipientId: msg?.recipient?.id || msg?.to?.id || null,
+    messageId: message.mid || message.id || msg?.message_id || null,
+    text,
+    eventKind,
+    attachments,
+    commentId: referral.comment_id || referral.comment?.id || message?.reply_to?.comment_id || message?.reply_to?.mid || null,
+    raw: msg,
+    parserDebug: {
+      topKeys: Object.keys(msg || {}),
+      messageKeys: Object.keys(message || {}),
+      hasText: Boolean(text),
+      eventKind
+    }
   };
 }
 
@@ -233,18 +276,24 @@ export async function processMessageEvent(msg, options = {}) {
   const simulate = Boolean(options.simulate);
   if (isMetaSampleEvent(msg, e)) return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored' };
   if (!e.text || !normalize(e.text)) {
-    await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received','message_received_without_text',$1,$2,$3)`, [e.text || '', e.senderId, msg]);
-    return { matched: false, status: 'received', reason: 'message_received_without_text' };
+    const reason = `message_without_text:${e.eventKind || 'unknown'}`;
+    await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received',$1,$2,$3,$4)`, [reason, e.text || '', e.senderId, { msg, parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind }]);
+    return { matched: false, status: 'received', reason, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind };
   }
+
+  // Log visible inbound text before matching so it is obvious that Direct parsing works.
+  await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received','dm_text_received',$1,$2,$3)`, [e.text, e.senderId, { parserDebug: e.parserDebug, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind }]);
 
   const { accounts, rules } = await loadEnabledRules();
   if (!accounts.length) return logIgnored('no_active_instagram_accounts', msg, { eventType: 'message', senderId: e.senderId, text: e.text });
   if (!rules.length) return logIgnored('no_enabled_rules', msg, { eventType: 'message', senderId: e.senderId, text: e.text });
 
-  const { selected, matchInfo, checkedRules } = selectRule(rules, e.text);
-  if (!selected) return logIgnored('keyword_not_matched', msg, { eventType: 'message', senderId: e.senderId, text: normalize(e.text), checkedRules });
+  const recipientAccount = accounts.find(a => String(a.ig_user_id || '') === String(e.recipientId || '') || String(a.page_id || '') === String(e.recipientId || ''));
+  const candidateRules = recipientAccount ? rules.filter(r => r.account_id === recipientAccount.id) : rules;
+  const { selected, matchInfo, checkedRules } = selectRule(candidateRules, e.text);
+  if (!selected) return logIgnored('keyword_not_matched', msg, { eventType: 'message', senderId: e.senderId, recipientId: e.recipientId, text: normalize(e.text), checkedRules, accountFiltered: Boolean(recipientAccount) });
 
-  const account = accounts.find(a => a.id === selected.account_id) || selected;
+  const account = accounts.find(a => a.id === selected.account_id) || recipientAccount || selected;
   const dmText = [selected.dm_message, selected.target_url].filter(Boolean).join('\n\n');
   const apiResponses = {};
   const errors = [];
@@ -266,7 +315,7 @@ export async function processMessageEvent(msg, options = {}) {
   await query(
     `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,comment_id,comment_text,dm_text,status,error,raw_event)
      VALUES($1,$2,'message',$3,$4,$5,$6,$7,$8,$9)`,
-    [selected.account_id, selected.id, e.senderId || null, e.commentId || null, e.text, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, event: msg }]
+    [selected.account_id, selected.id, e.senderId || null, e.commentId || null, e.text, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, senderId: e.senderId, recipientId: e.recipientId, messageId: e.messageId, eventKind: e.eventKind, parserDebug: e.parserDebug, event: msg }]
   );
   return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, senderId: e.senderId, error, apiResponses };
 }
