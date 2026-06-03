@@ -1,1 +1,0 @@
-$(sed 's/$/PLACEHOLDER/' /mnt/data/work/src/server.js)

@@ -140,3 +140,8 @@ A real inbound DM payload must contain something like:
 ```
 
 Payloads with only `message_edit.mid` are now ignored and logged as diagnostic events.
+
+
+## Fix: Direct messages permission
+
+В Facebook legacy mode OAuth теперь запрашивает `instagram_manage_messages`. После деплоя обязательно переподключите Instagram, чтобы новый access token получил это разрешение. В OAuth по-прежнему нет `pages_messaging` и `pages_manage_metadata`.

@@ -24,7 +24,7 @@ export function instagramBusinessScopes() {
 
 export function facebookLegacyScopes() {
   // Fallback for old Facebook Page flow. Kept only for compatibility and not used by default.
-  return ['pages_show_list', 'pages_read_engagement', 'instagram_basic', 'instagram_manage_comments', 'business_management'];
+  return ['pages_show_list', 'pages_read_engagement', 'instagram_basic', 'instagram_manage_comments', 'instagram_manage_messages', 'business_management'];
 }
 
 export async function graphGet(path, params = {}, token) {
