@@ -33,12 +33,7 @@ export async function exchangeCodeForToken(code, redirectUri) {
   const cfg = await metaConfig();
   const url = `https://graph.facebook.com/${cfg.graphVersion}/oauth/access_token`;
   const { data } = await axios.get(url, {
-    params: {
-      client_id: cfg.appId,
-      client_secret: cfg.appSecret,
-      redirect_uri: redirectUri,
-      code
-    }
+    params: { client_id: cfg.appId, client_secret: cfg.appSecret, redirect_uri: redirectUri, code }
   });
   return data;
 }
@@ -47,12 +42,7 @@ export async function exchangeLongLived(shortToken) {
   const cfg = await metaConfig();
   const url = `https://graph.facebook.com/${cfg.graphVersion}/oauth/access_token`;
   const { data } = await axios.get(url, {
-    params: {
-      grant_type: 'fb_exchange_token',
-      client_id: cfg.appId,
-      client_secret: cfg.appSecret,
-      fb_exchange_token: shortToken
-    }
+    params: { grant_type: 'fb_exchange_token', client_id: cfg.appId, client_secret: cfg.appSecret, fb_exchange_token: shortToken }
   });
   return data;
 }
@@ -62,9 +52,9 @@ export async function getPagesWithInstagram(token) {
   return (pages.data || []).filter(p => p.instagram_business_account);
 }
 
-
-export async function getCommentDetails(commentId, token) {
-  return graphGet(`/${commentId}`, { fields: 'id,text,username,from,media,timestamp' }, token);
+export async function subscribePageToApp(pageId, pageAccessToken) {
+  // Needed for real-time Page/Instagram webhooks. Safe to call multiple times.
+  return graphPost(`/${pageId}/subscribed_apps`, { subscribed_fields: 'feed,messages,messaging_postbacks,messaging_referrals' }, pageAccessToken);
 }
 
 export async function replyToComment(commentId, message, token) {
@@ -72,10 +62,16 @@ export async function replyToComment(commentId, message, token) {
 }
 
 export async function privateReply(igUserId, commentId, message, token) {
-  // Instagram Private Replies use the Instagram Business/Creator account messages edge,
-  // not the Facebook Page messages edge. Requires instagram_manage_messages.
+  // Instagram Private Replies: send one DM to the user who commented.
   return graphPost(`/${igUserId}/messages`, {
     recipient: { comment_id: String(commentId) },
+    message: { text: String(message || '') }
+  }, token);
+}
+
+export async function sendInstagramMessage(igUserId, recipientId, message, token) {
+  return graphPost(`/${igUserId}/messages`, {
+    recipient: { id: String(recipientId) },
     message: { text: String(message || '') }
   }, token);
 }

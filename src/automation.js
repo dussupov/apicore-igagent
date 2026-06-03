@@ -1,5 +1,5 @@
 import { query, getSetting } from './db.js';
-import { replyToComment, privateReply, getCommentDetails } from './meta.js';
+import { replyToComment, privateReply, sendInstagramMessage } from './meta.js';
 
 function normalize(s = '') {
   return String(s)
@@ -12,13 +12,23 @@ function normalize(s = '') {
 }
 
 function keywordVariants(keyword = '') {
-  return String(keyword)
-    .split(/[\n,;]+/)
-    .map(normalize)
-    .filter(Boolean);
+  return String(keyword).split(/[\n,;]+/).map(normalize).filter(Boolean);
 }
 
 function pickRandom(arr = []) { return arr[Math.floor(Math.random() * arr.length)] || ''; }
+
+function apiError(err) {
+  return err?.response?.data ? JSON.stringify(err.response.data) : (err?.message || String(err));
+}
+
+function isMetaSampleEvent(payload, extracted = {}) {
+  const text = normalize(extracted.text || '');
+  const raw = JSON.stringify(payload || {}).toLowerCase();
+  return text === 'this is an example' ||
+    String(extracted.commentId || '').startsWith('test_') ||
+    raw.includes('this is an example') ||
+    raw.includes('"test"');
+}
 
 function matches(rule, text) {
   const t = normalize(text);
@@ -29,10 +39,9 @@ function matches(rule, text) {
     if (!kk) continue;
     if (rule.match_mode === 'exact') {
       if (t === kk) return { ok: true, keyword: kk, checked };
-      continue;
+    } else if (t.includes(kk)) {
+      return { ok: true, keyword: kk, checked };
     }
-    // contains mode: match full phrase or a word boundary-like match for short keywords.
-    if (t.includes(kk)) return { ok: true, keyword: kk, checked };
   }
   return { ok: false, keyword: null, checked };
 }
@@ -48,125 +57,165 @@ async function rateLimitOk(accountId, limit) {
   return rows[0].count <= limit;
 }
 
-function extractEvent(changeOrEvent) {
+function extractCommentEvent(changeOrEvent) {
   const value = changeOrEvent?.value || changeOrEvent || {};
   const entryId = changeOrEvent?.entry_id || changeOrEvent?.id || null;
   return {
     value,
-    commentId: value.id || value.comment_id || value.comment?.id || null,
+    commentId: value.id || value.comment_id || value.comment?.id || value.comment?.comment_id || null,
     mediaId: value.media?.id || value.media_id || value.post_id || null,
-    text: value.text || value.message || value.comment?.text || '',
+    text: value.text || value.message || value.comment?.text || value.comment?.message || '',
     from: value.from || value.user || value.sender || {},
     igBusinessId: value.ig_id || value.owner_id || value.media?.owner?.id || entryId || null,
   };
 }
 
+function extractMessageEvent(msg) {
+  const message = msg?.message || {};
+  const referral = msg?.referral || message?.referral || {};
+  return {
+    senderId: msg?.sender?.id || msg?.from?.id || null,
+    recipientId: msg?.recipient?.id || null,
+    text: message.text || msg?.text || msg?.postback?.payload || msg?.postback?.title || referral.ref || '',
+    commentId: referral.comment_id || referral.comment?.id || message?.reply_to?.comment_id || null,
+    raw: msg
+  };
+}
+
+async function loadEnabledRules() {
+  const { rows: accounts } = await query('SELECT * FROM instagram_accounts WHERE is_active=TRUE ORDER BY id DESC');
+  if (!accounts.length) return { accounts, rules: [] };
+  const accountIds = accounts.map(a => a.id);
+  const { rows: rules } = await query(
+    `SELECT r.*, a.username AS account_username, a.ig_user_id, a.page_id, a.access_token
+     FROM automation_rules r
+     JOIN instagram_accounts a ON a.id = r.account_id
+     WHERE r.enabled=TRUE AND a.is_active=TRUE AND r.account_id = ANY($1::int[])
+     ORDER BY r.id DESC`, [accountIds]
+  );
+  return { accounts, rules };
+}
+
+function selectRule(rules, text) {
+  const checkedRules = [];
+  for (const rule of rules) {
+    const m = matches(rule, text);
+    checkedRules.push({ ruleId: rule.id, ruleName: rule.name, account: rule.account_username, keywords: rule.keywords || [], checked: m.checked, matchedKeyword: m.keyword });
+    if (m.ok) return { selected: rule, matchInfo: m, checkedRules };
+  }
+  return { selected: null, matchInfo: null, checkedRules };
+}
+
 async function logIgnored(reason, event, data = {}) {
-  const e = extractEvent(event);
-  const raw = { reason, ...data, event };
+  const e = extractCommentEvent(event);
   await query(
     `INSERT INTO automation_logs(event_type,ig_user_id,ig_username,media_id,comment_id,comment_text,status,error,raw_event)
-     VALUES('comment',$1,$2,$3,$4,$5,'ignored',$6,$7)`,
-    [e.from.id || null, e.from.username || e.from.name || null, e.mediaId, e.commentId, e.text, reason, raw]
+     VALUES($1,$2,$3,$4,$5,$6,'ignored',$7,$8)`,
+    [data.eventType || 'comment', e.from.id || data.senderId || null, e.from.username || e.from.name || null, e.mediaId, e.commentId || data.commentId || null, e.text || data.text || '', reason, { reason, ...data, event }]
   );
   return { matched: false, status: 'ignored', reason, ...data };
 }
 
 export async function processCommentEvent(changeOrEvent, options = {}) {
-  const e = extractEvent(changeOrEvent);
-  let { commentId, mediaId, text, from } = e;
+  const e = extractCommentEvent(changeOrEvent);
+  const { commentId, mediaId, text, from } = e;
   const simulate = Boolean(options.simulate);
 
-  const { rows: accounts } = await query('SELECT * FROM instagram_accounts WHERE is_active=TRUE ORDER BY id DESC');
-  if (!accounts.length) {
-    return logIgnored('no_active_instagram_accounts', changeOrEvent);
+  if (!simulate && isMetaSampleEvent(changeOrEvent, e)) {
+    console.log('[WEBHOOK_SAMPLE_IGNORED]', { text, commentId });
+    return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored', sample: true };
   }
+  if (!text || !normalize(text)) return logIgnored('empty_comment_text', changeOrEvent);
 
-  let accountForFetch = accounts.find(a => String(a.ig_user_id) === String(e.igBusinessId)) || accounts[0];
-  let enrichedComment = null;
+  const { accounts, rules } = await loadEnabledRules();
+  if (!accounts.length) return logIgnored('no_active_instagram_accounts', changeOrEvent);
+  if (!rules.length) return logIgnored('no_enabled_rules', changeOrEvent, { activeAccounts: accounts.map(a => a.username) });
 
-  // Some Instagram webhook comment events contain only the comment ID, not the text.
-  // In that case we must fetch the comment from Graph API before keyword matching.
-  if ((!text || !normalize(text)) && commentId && !simulate) {
-    try {
-      enrichedComment = await getCommentDetails(commentId, accountForFetch.access_token);
-      text = enrichedComment?.text || enrichedComment?.message || text || '';
-      from = enrichedComment?.from || { username: enrichedComment?.username } || from || {};
-      mediaId = enrichedComment?.media?.id || mediaId || null;
-    } catch (err) {
-      const error = err?.response?.data ? JSON.stringify(err.response.data) : (err.message || String(err));
-      return logIgnored('comment_text_fetch_failed', changeOrEvent, { commentId, error });
-    }
-  }
-
-  if (!text || !normalize(text)) {
-    return logIgnored('empty_comment_text', changeOrEvent, { commentId, hint: 'Webhook did not include text and enrichment did not return text.' });
-  }
-
-  const accountIds = accounts.map(a => a.id);
-  const { rows: rules } = await query(
-    `SELECT r.*, a.username AS account_username, a.ig_user_id, a.access_token
-     FROM automation_rules r
-     JOIN instagram_accounts a ON a.id = r.account_id
-     WHERE r.enabled=TRUE AND a.is_active=TRUE AND r.account_id = ANY($1::int[])
-     ORDER BY r.id DESC`,
-    [accountIds]
-  );
-
-  if (!rules.length) {
-    return logIgnored('no_enabled_rules', changeOrEvent, { activeAccounts: accounts.map(a => a.username) });
-  }
-
-  const checkedRules = [];
-  let selected = null;
-  let matchInfo = null;
-  for (const rule of rules) {
-    const m = matches(rule, text);
-    checkedRules.push({ ruleId: rule.id, ruleName: rule.name, account: rule.account_username, keywords: rule.keywords || [], checked: m.checked, matchedKeyword: m.keyword });
-    if (m.ok) { selected = rule; matchInfo = m; break; }
-  }
-
-  if (!selected) {
-    return logIgnored('keyword_not_matched', changeOrEvent, { text: normalize(text), checkedRules });
-  }
+  const { selected, matchInfo, checkedRules } = selectRule(rules, text);
+  if (!selected) return logIgnored('keyword_not_matched', changeOrEvent, { text: normalize(text), checkedRules });
 
   const account = accounts.find(a => a.id === selected.account_id) || selected;
-  const ok = await rateLimitOk(selected.account_id, selected.rate_limit_per_minute || Number(await getSetting('DEFAULT_RATE_LIMIT_PER_MINUTE', '15')));
   const publicReply = pickRandom(selected.public_replies || []);
   const dmText = [selected.dm_message, selected.target_url].filter(Boolean).join('\n\n');
-  let status = simulate ? 'simulation_ok' : 'matched';
-  let error = null;
   const apiResponses = {};
+  const errors = [];
+  let status = simulate ? 'simulation_ok' : 'matched';
 
-  try {
-    if (!ok) throw new Error('Rate limit exceeded for this account/minute');
-    if (!commentId) throw new Error('No comment id in webhook event');
-    if (!account.ig_user_id && selected.use_private_reply) throw new Error('No Instagram ig_user_id saved for this account. Reconnect Instagram via Meta OAuth.');
+  if (!simulate) {
+    const ok = await rateLimitOk(selected.account_id, selected.rate_limit_per_minute || Number(await getSetting('DEFAULT_RATE_LIMIT_PER_MINUTE', '15')));
+    if (!ok) errors.push('rate_limit_exceeded');
+    if (!commentId) errors.push('no_comment_id_in_webhook_event');
 
-    if (!simulate) {
+    if (ok && commentId) {
       if (selected.use_public_reply && publicReply) {
-        apiResponses.publicReply = await replyToComment(commentId, publicReply, account.access_token || selected.access_token);
+        try { apiResponses.publicReply = await replyToComment(commentId, publicReply, account.access_token || selected.access_token); }
+        catch (err) { errors.push(`public_reply_error: ${apiError(err)}`); }
       }
       if (selected.use_private_reply && dmText) {
-        apiResponses.privateReply = await privateReply(account.ig_user_id, commentId, dmText, account.access_token || selected.access_token);
+        try { apiResponses.privateReply = await privateReply(account.ig_user_id, commentId, dmText, account.access_token || selected.access_token); }
+        catch (err) { errors.push(`private_reply_error: ${apiError(err)}`); }
       }
-      status = 'sent';
     }
-  } catch (err) {
-    status = 'error';
-    error = err?.response?.data ? JSON.stringify(err.response.data) : (err.message || String(err));
+
+    const hasSuccess = Boolean(apiResponses.publicReply || apiResponses.privateReply);
+    status = hasSuccess ? 'sent' : 'error';
   }
 
+  const error = errors.length ? errors.join('\n') : null;
   await query(
     `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,ig_username,media_id,comment_id,comment_text,selected_public_reply,dm_text,status,error,raw_event)
      VALUES($1,$2,'comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, enrichedComment, event: changeOrEvent }]
+    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, event: changeOrEvent }]
   );
-  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, igUserId: account.ig_user_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses }; 
+
+  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, igUserId: account.ig_user_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses };
+}
+
+export async function processMessageEvent(msg, options = {}) {
+  const e = extractMessageEvent(msg);
+  const simulate = Boolean(options.simulate);
+  if (isMetaSampleEvent(msg, e)) return { matched: false, status: 'ignored', reason: 'meta_sample_event_ignored' };
+  if (!e.text || !normalize(e.text)) {
+    await query(`INSERT INTO automation_logs(event_type,status,error,comment_text,ig_user_id,raw_event) VALUES('message','received','message_received_without_text',$1,$2,$3)`, [e.text || '', e.senderId, msg]);
+    return { matched: false, status: 'received', reason: 'message_received_without_text' };
+  }
+
+  const { accounts, rules } = await loadEnabledRules();
+  if (!accounts.length) return logIgnored('no_active_instagram_accounts', msg, { eventType: 'message', senderId: e.senderId, text: e.text });
+  if (!rules.length) return logIgnored('no_enabled_rules', msg, { eventType: 'message', senderId: e.senderId, text: e.text });
+
+  const { selected, matchInfo, checkedRules } = selectRule(rules, e.text);
+  if (!selected) return logIgnored('keyword_not_matched', msg, { eventType: 'message', senderId: e.senderId, text: normalize(e.text), checkedRules });
+
+  const account = accounts.find(a => a.id === selected.account_id) || selected;
+  const dmText = [selected.dm_message, selected.target_url].filter(Boolean).join('\n\n');
+  const apiResponses = {};
+  const errors = [];
+  let status = simulate ? 'simulation_ok' : 'matched';
+
+  if (!simulate) {
+    const ok = await rateLimitOk(selected.account_id, selected.rate_limit_per_minute || Number(await getSetting('DEFAULT_RATE_LIMIT_PER_MINUTE', '15')));
+    if (!ok) errors.push('rate_limit_exceeded');
+    if (!e.senderId) errors.push('no_sender_id_in_message_event');
+    if (!dmText) errors.push('empty_dm_template');
+    if (ok && e.senderId && dmText) {
+      try { apiResponses.messageReply = await sendInstagramMessage(account.ig_user_id, e.senderId, dmText, account.access_token || selected.access_token); }
+      catch (err) { errors.push(`message_reply_error: ${apiError(err)}`); }
+    }
+    status = apiResponses.messageReply ? 'sent' : 'error';
+  }
+
+  const error = errors.length ? errors.join('\n') : null;
+  await query(
+    `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,comment_id,comment_text,dm_text,status,error,raw_event)
+     VALUES($1,$2,'message',$3,$4,$5,$6,$7,$8,$9)`,
+    [selected.account_id, selected.id, e.senderId || null, e.commentId || null, e.text, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, errors, event: msg }]
+  );
+  return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, senderId: e.senderId, error, apiResponses };
 }
 
 export async function debugMatchComment(text = 'ремонт') {
-  const { rows: accounts } = await query('SELECT id,username,is_active FROM instagram_accounts ORDER BY id DESC');
+  const { rows: accounts } = await query('SELECT id,username,is_active,ig_user_id,page_id FROM instagram_accounts ORDER BY id DESC');
   const { rows: rules } = await query(`SELECT r.*, a.username account_username FROM automation_rules r JOIN instagram_accounts a ON a.id=r.account_id ORDER BY r.id DESC`);
   return {
     text,

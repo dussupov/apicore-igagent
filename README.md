@@ -104,6 +104,24 @@ https://YOUR_DOMAIN/api/meta/debug
 
 В поле `oauthScopes` не должно быть `pages_messaging`. Если Meta всё ещё показывает `Invalid Scopes: pages_messaging`, значит на Render задеплоена старая сборка или браузер открыл старый URL. Сделай Manual Deploy -> Clear build cache & deploy.
 
-## Fix: empty_comment_text
 
-If Meta sends a comment webhook without text, the app now fetches the comment details from Graph API using the real `comment_id` before matching keywords. If the fetch fails, Logs will show `comment_text_fetch_failed` with the Meta API error.
+## Обновление: тестовые события Meta
+
+Если Meta Webhooks показывает пример `This is an example`, система теперь игнорирует его и не засоряет логи как `keyword_not_matched`. Реальные комментарии Instagram продолжают обрабатываться через `/webhook/meta`.
+
+Для проверки правила без отправки в Instagram используй:
+
+```text
+/api/debug/match?text=апикор
+```
+
+Для проверки реального webhook оставь комментарий под постом с другого Instagram-аккаунта и смотри раздел **Логи**.
+
+## Fix: webhook received but no reply
+This build processes webhook events after `received` instead of only logging them:
+- `comments`, `live_comments`, `mentions` are processed as Instagram comment events.
+- `messaging` events are also checked against rules and replied to as DM messages when possible.
+- Public comment reply and private reply are attempted independently, so one failure does not block the other.
+- Meta API errors are stored in Logs under `Причина/ошибка`.
+
+After deploying, set `DRY_RUN=false`, reconnect Instagram once, and test with a real comment containing an active keyword.

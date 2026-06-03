@@ -3,8 +3,8 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { initDb, query, getSetting, setSetting, pool, databaseState, hasDatabase } from './db.js';
-import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram } from './meta.js';
-import { processCommentEvent, debugMatchComment } from './automation.js';
+import { metaConfig, exchangeCodeForToken, exchangeLongLived, getPagesWithInstagram, subscribePageToApp } from './meta.js';
+import { processCommentEvent, processMessageEvent, debugMatchComment } from './automation.js';
 
 const app = express();
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -178,6 +178,7 @@ app.get('/auth/meta/callback', requireAuth, async (req,res)=>{
       ]));
     }
     for (const p of pages) {
+      try { await subscribePageToApp(p.id, p.access_token || longToken.access_token); } catch (subErr) { console.warn('[PAGE_SUBSCRIBE_WARNING]', subErr?.response?.data || subErr.message || subErr); }
       await query(`INSERT INTO instagram_accounts(ig_user_id,username,page_id,page_name,access_token,token_expires_at,updated_at)
         VALUES($1,$2,$3,$4,$5,NOW() + INTERVAL '55 days',NOW())
         ON CONFLICT(ig_user_id) DO UPDATE SET username=EXCLUDED.username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,access_token=EXCLUDED.access_token,token_expires_at=EXCLUDED.token_expires_at,updated_at=NOW()`,
@@ -293,17 +294,34 @@ app.get('/api/webhook/debug', requireAuth, async (req,res)=>{
   });
 });
 app.post('/webhook/meta', async (req,res)=>{
+  // Meta needs fast 200 OK. Processing continues async after response.
   res.sendStatus(200);
   try {
+    let processed = 0;
     for (const entry of req.body.entry || []) {
       for (const change of entry.changes || []) {
-        if (['comments','mentions'].includes(change.field) || change.value?.text) await processCommentEvent({...change, entry_id: entry.id});
+        const field = change.field || '';
+        const value = change.value || {};
+        // Real Instagram comment payloads arrive as changes. Support comments, live_comments and mentions.
+        if (['comments','live_comments','mentions'].includes(field) || value.id || value.comment_id || value.text || value.message || value.comment) {
+          const result = await processCommentEvent({...change, entry_id: entry.id});
+          console.log('[WEBHOOK_CHANGE_PROCESSED]', field, result);
+          processed++;
+        }
       }
       for (const msg of entry.messaging || []) {
-        if (hasDatabase()) await query(`INSERT INTO automation_logs(event_type,status,raw_event) VALUES('message','received',$1)`, [msg]);
+        // Some Instagram events arrive under messaging. Do not stop at "received"; try to match and reply.
+        const result = await processMessageEvent({...msg, entry_id: entry.id});
+        console.log('[WEBHOOK_MESSAGE_PROCESSED]', result);
+        processed++;
       }
     }
-  } catch(e) { console.error('Webhook processing error', e); }
+    if (!processed && hasDatabase()) {
+      const bodyText = JSON.stringify(req.body || {});
+      if (bodyText.includes('This is an example')) console.log('[WEBHOOK_SAMPLE_POST_IGNORED]');
+      else await query(`INSERT INTO automation_logs(event_type,status,error,raw_event) VALUES('webhook','unhandled','webhook_received_but_no_comment_payload',$1)`, [req.body]);
+    }
+  } catch(e) { console.error('Webhook processing error', e?.response?.data || e); }
 });
 
 app.post('/api/test-webhook', requireAuth, requireDb, async (req,res)=>{
