@@ -62,6 +62,11 @@ export async function getPagesWithInstagram(token) {
   return (pages.data || []).filter(p => p.instagram_business_account);
 }
 
+
+export async function getCommentDetails(commentId, token) {
+  return graphGet(`/${commentId}`, { fields: 'id,text,username,from,media,timestamp' }, token);
+}
+
 export async function replyToComment(commentId, message, token) {
   return graphPost(`/${commentId}/replies`, { message }, token);
 }

@@ -103,3 +103,7 @@ https://YOUR_DOMAIN/api/meta/debug
 ```
 
 В поле `oauthScopes` не должно быть `pages_messaging`. Если Meta всё ещё показывает `Invalid Scopes: pages_messaging`, значит на Render задеплоена старая сборка или браузер открыл старый URL. Сделай Manual Deploy -> Clear build cache & deploy.
+
+## Fix: empty_comment_text
+
+If Meta sends a comment webhook without text, the app now fetches the comment details from Graph API using the real `comment_id` before matching keywords. If the fetch fails, Logs will show `comment_text_fetch_failed` with the Meta API error.

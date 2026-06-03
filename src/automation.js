@@ -1,5 +1,5 @@
 import { query, getSetting } from './db.js';
-import { replyToComment, privateReply } from './meta.js';
+import { replyToComment, privateReply, getCommentDetails } from './meta.js';
 
 function normalize(s = '') {
   return String(s)
@@ -74,16 +74,33 @@ async function logIgnored(reason, event, data = {}) {
 
 export async function processCommentEvent(changeOrEvent, options = {}) {
   const e = extractEvent(changeOrEvent);
-  const { commentId, mediaId, text, from } = e;
+  let { commentId, mediaId, text, from } = e;
   const simulate = Boolean(options.simulate);
-
-  if (!text || !normalize(text)) {
-    return logIgnored('empty_comment_text', changeOrEvent);
-  }
 
   const { rows: accounts } = await query('SELECT * FROM instagram_accounts WHERE is_active=TRUE ORDER BY id DESC');
   if (!accounts.length) {
     return logIgnored('no_active_instagram_accounts', changeOrEvent);
+  }
+
+  let accountForFetch = accounts.find(a => String(a.ig_user_id) === String(e.igBusinessId)) || accounts[0];
+  let enrichedComment = null;
+
+  // Some Instagram webhook comment events contain only the comment ID, not the text.
+  // In that case we must fetch the comment from Graph API before keyword matching.
+  if ((!text || !normalize(text)) && commentId && !simulate) {
+    try {
+      enrichedComment = await getCommentDetails(commentId, accountForFetch.access_token);
+      text = enrichedComment?.text || enrichedComment?.message || text || '';
+      from = enrichedComment?.from || { username: enrichedComment?.username } || from || {};
+      mediaId = enrichedComment?.media?.id || mediaId || null;
+    } catch (err) {
+      const error = err?.response?.data ? JSON.stringify(err.response.data) : (err.message || String(err));
+      return logIgnored('comment_text_fetch_failed', changeOrEvent, { commentId, error });
+    }
+  }
+
+  if (!text || !normalize(text)) {
+    return logIgnored('empty_comment_text', changeOrEvent, { commentId, hint: 'Webhook did not include text and enrichment did not return text.' });
   }
 
   const accountIds = accounts.map(a => a.id);
@@ -143,7 +160,7 @@ export async function processCommentEvent(changeOrEvent, options = {}) {
   await query(
     `INSERT INTO automation_logs(account_id,rule_id,event_type,ig_user_id,ig_username,media_id,comment_id,comment_text,selected_public_reply,dm_text,status,error,raw_event)
      VALUES($1,$2,'comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, event: changeOrEvent }]
+    [selected.account_id, selected.id, from.id || null, from.username || from.name || null, mediaId || null, commentId || null, text, publicReply, dmText, status, error, { matchedKeyword: matchInfo?.keyword, simulate, apiResponses, enrichedComment, event: changeOrEvent }]
   );
   return { matched: true, status, account: selected.account_username, rule: selected.name, keyword: matchInfo?.keyword, commentId, pageId: account.page_id, igUserId: account.ig_user_id, publicReply: selected.use_public_reply ? publicReply : null, privateReply: selected.use_private_reply ? dmText : null, error, apiResponses }; 
 }
